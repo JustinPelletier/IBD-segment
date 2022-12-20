@@ -22,6 +22,7 @@ REQUIREMENTS
 ------------
 
 Nextflow (tested with version 21)
+module load tabix/0.2.6
 
 Python 3.9.6
 
