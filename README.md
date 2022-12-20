@@ -9,8 +9,11 @@ INTRODUCTION
 CERC-Genomic-Medecine (https://github.com/CERC-Genomic-Medicine)
 
 This pipeline identifies IBD segments in genetic data (sequencing or genotyping).
+
 Implements phasing if necessary
+
 Run hapIBD
+
 Run phaseibd
 
 
