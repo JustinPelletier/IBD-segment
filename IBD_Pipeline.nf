@@ -7,6 +7,104 @@
 */
 
 
+process Phase {  
+   cpus 1
+   memory "8 GB"
+   time "4h"
+   scratch true
+
+   
+   input:
+   tuple path(bam), path(bam_index)
+   each chromosome
+
+   output:
+   
+   
+   
+   
+   """
+    samtools depth -a -s -q20 -Q20 -r ${chromosome} ${bam} | bgzip > ${chromosome}.${bam.getSimpleName()}.depth.gz
+    tabix -s1 -b2 -e2 ${chromosome}.${bam.getSimpleName()}.depth.gz
+    """
+     
+}
+
+
+process HapIBD {  
+   cpus 1
+   memory "8 GB"
+   time "4h"
+   scratch true
+   
+   
+   script:
+   if (param.phased == TRUE) {
+   
+   }else{
+   
+   
+   }
+   
+   
+   
+}
+
+
+
+process PhaseIBD {  
+   cpus 1
+   memory "8 GB"
+   time "4h"
+   scratch true
+   
+   script:
+   if (param.phased == TRUE) {
+   """
+   
+   """
+   }else{
+   """
+   
+   
+   """   
+   }
+   
+   
+   
+}
+
+
+process RemoveGaps {  
+   cpus 1
+   memory "8 GB"
+   time "4h"
+   scratch true
+   
+   
+   
+   script:
+   if (param.gaps == TRUE) {
+   """
+   
+   """
+   }else{
+   """
+   
+   
+   """   
+   }
+   
+   
+   
+}
+	
+	
+	
+	
+	
+	
+
 process HappyExome {  
    cpus 1
    memory "8 GB"
@@ -27,30 +125,6 @@ process HappyExome {
 
    """
    python ${params.happy} --threads 1 ${truth_vcf} ${study_vcf} -f ${truth_high_confidence_regions} -T ${study_target} -r ${params.reference} -o ${study_vcf.getName().toString().replace(".vcf.gz", "")}.happy_benchmark
-   """
-}
-
-
-process HappyGenome {  
-   cpus 1
-   memory "8 GB"
-   time "4h"
-   errorStrategy 'retry'
-   maxRetries 3
-
-   beforeScript "source ${params.virtualenv}"
-
-   input:
-   tuple val(name), path(study_vcf), path(truth_vcf), path(truth_high_confidence_regions)
-   env HGREF
-
-   output:
-   path "*.happy_benchmark.*"
-
-   publishDir "${params.resultFolder}", pattern: "*.happy_benchmark.*", mode: "copy"
-
-   """
-   python ${params.happy} --threads 1 ${truth_vcf} ${study_vcf} -f ${truth_high_confidence_regions} -r ${params.reference} -o ${study_vcf.getName().toString().replace(".vcf.gz", "")}.happy_benchmark
    """
 }
 
