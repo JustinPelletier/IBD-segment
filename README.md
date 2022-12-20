@@ -88,3 +88,12 @@ EXAMPLES
 -----------
 
 > python3 CERC_vcf_annotation.py -f <VCF_filename>.vcf.gz -g <GENCODE_filename>.gtf.gz -o "output"
+
+
+
+
+AUTHOR
+-----------
+PELLETIER Justin (https://www.genomic-medicine-cerc.online/current-team)
+
+email: justin.pelletier2@mcgill.ca
