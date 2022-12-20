@@ -8,68 +8,113 @@
 
 
 process Phase {  
-   cpus 1
-   memory "8 GB"
+   cpus 8
+   memory "16 GB"
    time "4h"
+   errorStrategy "finish"
+   cache "lenient"
    scratch true
 
    
    input:
-   tuple path(bam), path(bam_index)
+   path(genotype)
+   path(map)
+   path(beagle)
    each chromosome
 
    output:
+   path("*.vcf.gz")
    
-   
+   publishDir "BeaglePhased/", pattern: "*.vcf.gz", mode: "copy"
    
    
    """
-    samtools depth -a -s -q20 -Q20 -r ${chromosome} ${bam} | bgzip > ${chromosome}.${bam.getSimpleName()}.depth.gz
-    tabix -s1 -b2 -e2 ${chromosome}.${bam.getSimpleName()}.depth.gz
-    """
+   java -jar ${beagle} gt=${genotype} out=${genotype}.phased map=${map} nthreads=8 
+   """
      
 }
 
 
+//process MergeCHR { 
+
+
+}
+
+
 process HapIBD {  
-   cpus 1
-   memory "8 GB"
+   cpus 8
+   memory "16 GB"
    time "4h"
+   errorStrategy "finish"
+   cache "lenient"
    scratch true
+
    
+   input:
+   path(hapibd)
+   path(genotype)
+   path(map)
+   path(beagle)
+   each chromosome
+
+   output:
+   path("*.header.ibd.gz")
    
    script:
-   if (param.phased == TRUE) {
-   
-   }else{
-   
-   
+   if (param.phased == FLASE) {
+      """
+      #launch Phase process
+      """
    }
+   //then launch the hap-ibd program
+   """   
+   java -Xmx100g -jar ${hapibd} gt=${genotype} out=${genotype}.phased map=${map} nthreads=8 
    
-   
-   
+   #add header to the ibd output file
+   echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH" | bgzip -f > header.tmp.gz
+   cat header.tmp.gz ${genotype}.phased.ibd.gz > {genotype}.phased.header.ibd.gz 
+   """   
 }
 
 
 
 process PhaseIBD {  
-   cpus 1
-   memory "8 GB"
+   cpus 8
+   memory "16 GB"
    time "4h"
+   errorStrategy "finish"
+   cache "lenient"
    scratch true
+
+   
+   input:
+   path(phaseibd)
+   path(genotype)
+   path(map)
+   path(beagle)
+   each chromosome
+
+   output:
+   path("*.")
    
    script:
-   if (param.phased == TRUE) {
-   """
+   if (param.phased == FLASE) {
+      """
+      #launch Phase process
+      """
+   }
+   //then launch the hap-ibd program
+   """   
+   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
+   plink --vcf ${genotype} --cm-map ${map} ${chromsome} --make-bed --out ${TMPDIR}.${chromosome}.custom
+   awk '{print $1" . "$3" "$4}' ${TMPDIR}.${chromosome}.custom.bim > ${map}.${chromosome}.custom.map
    
-   """
-   }else{
-   """
+   echo "index,VCF_ID" | sed 's/,/\t/g' > ${genotype}.id
+   bcftools query -l ${genotype} | awk '{print int((NR-1)) " " $0}' | sed 's/ /\t/g' >> ${genotype}.id
    
+   python3 ${phaseibd} ${genotype} ${chromosome} ${TMPDIR} ${map}.${chromosome}.custom.map ${genotype}.id
    
    """   
-   }
-   
    
    
 }
@@ -101,42 +146,9 @@ process RemoveGaps {
 	
 	
 	
-	
-	
-	
-
-process HappyExome {  
-   cpus 1
-   memory "8 GB"
-   time "4h"
-   errorStrategy 'retry'
-   maxRetries 3
-
-   beforeScript "source ${params.virtualenv}"
-
-   input:
-   tuple val(name), path(study_vcf), path(study_target), path(truth_vcf), path(truth_high_confidence_regions)
-   env HGREF
-
-   output:
-   path "*.happy_benchmark.*"
-
-   publishDir "${params.resultFolder}", pattern: "*.happy_benchmark.*", mode: "copy"
-
-   """
-   python ${params.happy} --threads 1 ${truth_vcf} ${study_vcf} -f ${truth_high_confidence_regions} -T ${study_target} -r ${params.reference} -o ${study_vcf.getName().toString().replace(".vcf.gz", "")}.happy_benchmark
-   """
-}
-
-
 workflow {
-	truth = Channel.from(file(params.truthFiles).readLines()).map { line1 -> fields1 = line1.split(); [ fields1[0], file(fields1[1]), file(fields1[2]) ] }
-	
-	if (params.exome == true) {
-		input = Channel.from(file(params.inputFiles).readLines()).map { line2 -> fields2 = line2.split(); [ fields2[0], file(fields2[1]), file(fields2[2]) ] }
-		HappyExome(input.combine(truth, by: 0), params.reference)
-	} else {
-		input = Channel.from(file(params.inputFiles).readLines()).map { line2 -> fields2 = line2.split(); [ fields2[0], file(fields2[1]) ] }
-		HappyGenome(input.combine(truth, by: 0), params.reference)
-	}
+   
+   chromosomes = Channel.from(params.chromosomes)
+   
+   phased_geno = Phase(path(genotype), path(map), path(beagle), chromosomes)
 }
