@@ -12,9 +12,9 @@ This pipeline identifies IBD segments in genetic data (sequencing or genotyping)
 
 Implements phasing if necessary
 
-Run hapIBD
+Run hapIBD (https://github.com/browning-lab/hap-ibd)
 
-Run phaseibd
+Run phaseibd (https://github.com/23andMe/phasedibd) 
 
 
 
