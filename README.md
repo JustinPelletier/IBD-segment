@@ -6,10 +6,9 @@ Identical By Descent (IBD) segment detection
 INTRODUCTION
 ------------
 
-CERC-Genomic-Medecine skill test2 (https://github.com/CERC-Genomic-Medicine/skills_test_2)
+CERC-Genomic-Medecine (https://github.com/CERC-Genomic-Medicine)
 
-This command line tool writen in python is made to annotate a VCF file from a GENCODE GTF file. 
-
+This pipeline identifies IBD segments in genetic data (sequencing or genotyping).
 
 
 REQUIREMENTS
@@ -24,14 +23,7 @@ List of packages used:
 -pandas
 -numpy
 -re
--sys
--os
--datetime
--gzip
--shutil
--optparse
--collections
--cyvcf2
+
 
 
 INSTALLATION
