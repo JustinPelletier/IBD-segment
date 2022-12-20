@@ -9,10 +9,16 @@ INTRODUCTION
 CERC-Genomic-Medecine (https://github.com/CERC-Genomic-Medicine)
 
 This pipeline identifies IBD segments in genetic data (sequencing or genotyping).
+Implements phasing if necessary
+Run hapIBD
+Run phaseibd
+
 
 
 REQUIREMENTS
 ------------
+
+Nextflow (tested with version 21)
 
 Python 3.9.6
 
@@ -26,22 +32,28 @@ List of packages used:
 
 
 
-INSTALLATION
+RUNNING
 ------------
-Download the archive 
 
-Uncompress the files : tar -zxvf CERC_vcf_annotation.tar.gz
+    Clone this repository to the directory where you will run the pipeline:
 
+    git clone https://github.com/
 
-USAGE
-------------
-Before launching any analysis make sure all the required packages are install
-try : pip install -r requirements.txt
+    Modify nextflow.config configuration file.
+        params.vcfs -- path to your VCF/BCF file(s). You can use glob expressions to selecect multiple files.
+        params.assembly -- set to "GRCh37" or "GRCh38".
+        params.vep_cache -- full path to your local vep_cache directory.
+        params.vep_flags -- flags you want to pass to VEP.
+        
 
+    Run pipeline:
 
-The program is a python3 script and can be launched in the shell.
+    module load nextflow
+    module load singularity
+    nextflow run Annotation.nf -w ~/scratch/work_directory
 
-e.g.: python3 CERC_vcf_annotation.py <parameters> <options>
+    Important: when working on Compute Canada HPC, set working directory to ~/scratch/<new directory name>. This will speed up IO and also save space on your project partition. After the execution, if there were no errors and you are happy with the results, you can remove this working directory.
+
 
 
 OPTIONS
