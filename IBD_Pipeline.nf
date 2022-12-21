@@ -36,8 +36,31 @@ process Phase {
 
 
 //process MergeCHR { 
+   cpus 1
+   memory "20 GB"
+   time "1h"
+   errorStrategy "finish"
+   cache "lenient"
+   scratch true
 
+   
+   input:
+   path(genotype)
+   val(chromosome)
+   output:
+   path "${genotype}.merge.vcf.gz"
 
+   """
+   for chr in $(seq ${chromosome})
+   do
+   	if [ $chr == 1 ]
+	then
+   		zgrep "^#" ${genotype} > ${genotype}.merge.vcf
+	fi
+	zgrep -v "^#" ${genotype} >> ${genotype}.merge.vcf
+   done
+   bgzip -f ${genotype}.merge.vcf
+   """
 }
 
 
@@ -115,8 +138,6 @@ process PhaseIBD {
    python3 ${phaseibd} ${genotype} ${chromosome} ${TMPDIR} ${map}.${chromosome}.custom.map ${genotype}.id
    
    """   
-   
-   
 }
 
 
@@ -126,22 +147,27 @@ process RemoveGaps {
    time "4h"
    scratch true
    
-   
+   input:
+   path(phaseibd)
+   path(genotype)
+   path(map)
+   path(beagle)
+   each chromosome
+
+   output:
+   path("*.")
    
    script:
    if (param.gaps == TRUE) {
    """
    
+   
    """
    }else{
    """
-   
-   
+   echo "Gaps not removed"
    """   
-   }
-   
-   
-   
+   }   
 }
 	
 	
