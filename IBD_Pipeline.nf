@@ -17,50 +17,22 @@ process Phase {
 
    
    input:
-   path(genotype)
-   path(map)
-   path(beagle)
+   tuple path(genotype), path(map), path(beagle), path(out)
+   val CHR
    each chromosome
 
    output:
-   path("*.vcf.gz")
-   
-   publishDir "BeaglePhased/", pattern: "*.vcf.gz", mode: "copy"
-   
-   
-   """
-   java -jar ${beagle} gt=${genotype} out=${genotype}.phased map=${map} nthreads=8 
-   """
-     
-}
-
-
-//process MergeCHR { 
-   cpus 1
-   memory "20 GB"
-   time "1h"
-   errorStrategy "finish"
-   cache "lenient"
-   scratch true
-
-   
-   input:
-   path(genotype)
-   val(chromosome)
-   output:
-   path "${genotype}.merge.vcf.gz"
-
-   """
-   for chr in $(seq ${chromosome})
-   do
-   	if [ $chr == 1 ]
-	then
-   		zgrep "^#" ${genotype} > ${genotype}.merge.vcf
-	fi
-	zgrep -v "^#" ${genotype} >> ${genotype}.merge.vcf
-   done
-   bgzip -f ${genotype}.merge.vcf
-   """
+   tuple val(chromosome), path("${out}/${genotype}.chr${chromosome}.phased"), path(beagle), path(map) path(out)
+      
+   script:
+   if( CHR == "True" )
+   	"""
+   	java -jar ${beagle} gt=${genotype} out=${out}/${genotype}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=8 
+   	"""
+    else
+    	"""
+	java -jar ${beagle} gt=${genotype} out=${out}/${genotype}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
+	"""
 }
 
 
@@ -74,15 +46,12 @@ process HapIBD {
 
    
    input:
+   tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
    path(hapibd)
-   path(genotype)
-   path(map)
-   path(beagle)
    path(gap)
-   each chromosome
 
    output:
-   path("${genotype}.nogap.header.ibd")
+   path("${out}/${genotype}.chr${chromosome}.nogap.header.ibd")
    
    script:
    if (param.phased == FLASE) {
@@ -123,11 +92,9 @@ process PhaseIBD {
 
    
    input:
+   tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
    path(phaseibd)
-   path(genotype)
-   path(map)
-   path(beagle)
-   each chromosome
+   path(gap)
 
    output:
    path("${chromosome}.nogap.header.ibd.gz")
