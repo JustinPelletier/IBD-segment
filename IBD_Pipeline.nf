@@ -18,11 +18,10 @@ process Phase {
    
    input:
    tuple path(genotype), path(map), path(beagle), path(out)
-   val CHR
    each chromosome
 
    output:
-   tuple val(chromosome), path("${out}/${genotype}.chr${chromosome}.phased"), path(beagle), path(map) path(out)
+   tuple val(chromosome), path("${out}/${genotype}.chr${chromosome}.phased"), path(beagle), path(map), path(out)
       
    script:
    if( CHR == "True" )
@@ -49,6 +48,7 @@ process HapIBD {
    tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
    path(hapibd)
    path(gap)
+   each chromosome
 
    output:
    path("${out}/${genotype}.chr${chromosome}.nogap.header.ibd")
