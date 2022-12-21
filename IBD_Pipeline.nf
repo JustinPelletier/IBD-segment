@@ -78,10 +78,11 @@ process HapIBD {
    path(genotype)
    path(map)
    path(beagle)
+   path(gap)
    each chromosome
 
    output:
-   path("*.header.ibd.gz")
+   path("${genotype}.nogap.header.ibd")
    
    script:
    if (param.phased == FLASE) {
@@ -91,11 +92,22 @@ process HapIBD {
    }
    //then launch the hap-ibd program
    """   
-   java -Xmx100g -jar ${hapibd} gt=${genotype} out=${genotype}.phased map=${map} nthreads=8 
+   java -Xmx100g -jar ${hapibd} gt=${genotype} out=${genotype} map=${map} nthreads=8 
+   gunzip ${genotype}.ibd.gz
+   
+   #remove IBD overlapping gaps in the genome
+   FILENAME=${gap}
+   IFS=$'\t'
+   
+   while read CHOM START END TYPE; do
+	awk -v a=$START -v b=$END '{ if (!( ($6<=a && $7>=a) || ($6<=b && $7>=b) || ($6>=a && $7<=b) )) { print }}' ${genotype}.ibd > ${genotype}.ibd.tmp
+	mv ${genotype}.ibd.tmp ${genotype}.ibd
+   done <$FILENAME
    
    #add header to the ibd output file
-   echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH" | bgzip -f > header.tmp.gz
-   cat header.tmp.gz ${genotype}.phased.ibd.gz > {genotype}.phased.header.ibd.gz 
+   echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH"  > header.tmp
+   cat header.tmp ${genotype}.ibd > ${genotype}.nogap.ibd
+   bgzip -f ${genotype}.nogap.header.ibd
    """   
 }
 
@@ -118,7 +130,7 @@ process PhaseIBD {
    each chromosome
 
    output:
-   path("*.")
+   path("${chromosome}.nogap.header.ibd.gz")
    
    script:
    if (param.phased == FLASE) {
@@ -136,9 +148,24 @@ process PhaseIBD {
    bcftools query -l ${genotype} | awk '{print int((NR-1)) " " $0}' | sed 's/ /\t/g' >> ${genotype}.id
    
    python3 ${phaseibd} ${genotype} ${chromosome} ${TMPDIR} ${map}.${chromosome}.custom.map ${genotype}.id
+   head -1 ${chromosome}.ibd > ${chromosome}.ibd.header
+   sed -i '1d' ${chromosome}.ibd
    
+   #remove IBD overlapping gaps in the genome
+   FILENAME=${gap}
+   IFS=$'\t'
+   while read CHOM START END TYPE; do
+   	awk -v a=$START -v b=$END '{ if (!( ($10<=a && $11>=a) || ($10<=b && $11>=b) || ($10>=a && $11<=b) )) { print }}' ${chromosome}.ibd > ${chromosome}.ibd.tmp
+	mv ${chromosome}.ibd.tmp ${chromosome}.ibd
+   done <$FILENAME
+   
+   #add header to the ibd output file
+   cat ${chromosome}.ibd.header ${chromosome}.ibd > ${chromosome}.nogap.header.ibd
+   bgzip -f ${chromosome}.nogap.header.ibd
    """   
 }
+
+
 
 
 process RemoveGaps {  
@@ -148,9 +175,9 @@ process RemoveGaps {
    scratch true
    
    input:
-   path(phaseibd)
-   path(genotype)
-   path(map)
+   path(phaseibd_result)
+   path(hapibd_result)
+   path(gap)
    path(beagle)
    each chromosome
 
@@ -160,7 +187,22 @@ process RemoveGaps {
    script:
    if (param.gaps == TRUE) {
    """
+   #remove IBD overlapping gaps in the genome
+   FILENAME=${gap}
+   IFS=$'\t'
    
+   while read CHOM START END TYPE; do
+	   #echo "CHOM=$CHOM START=$START END=$END TYPE=$TYPE"
+
+	   awk -v a=$START -v b=$END '{ if (!( ($6<=a && $7>=a) || ($6<=b && $7>=b) || ($6>=a && $7<=b) )) { print }}' $path_gap/cp_nogap_hapIBD_cag_chrCHR.ibd > $path_gap/tmp_nogap_hapIBD_cag_chrCHR.ibd
+	   mv $path_gap/tmp_nogap_hapIBD_cag_chrCHR.ibd $path_gap/cp_nogap_hapIBD_cag_chrCHR.ibd
+	   OUTPUT=$(wc -l $path_gap/cp_nogap_hapIBD_cag_chrCHR.ibd | cut -d " " -f1)
+
+	   awk -v a=$START -v b=$END '{ if (!( ($10<=a && $11>=a) || ($10<=b && $11>=b) || ($10>=a && $11<=b) )) { print }}' $path_gap/cp_nogap_phaseIBD_cag_chrCHR.ibd > $path_phaseIBD/tmp_nogap_phaseIBD_cag_chrCHR.ibd
+	   mv $path_phaseIBD/tmp_nogap_phaseIBD_cag_chrCHR.ibd $path_phaseIBD/cp_nogap_phaseIBD_cag_chrCHR.ibd
+	   TEST=$(wc -l $path_phaseIBD/cp_nogap_phaseIBD_cag_chrCHR.ibd | cut -d " " -f1)
+
+   done <$FILENAME
    
    """
    }else{
@@ -176,5 +218,5 @@ workflow {
    
    chromosomes = Channel.from(params.chromosomes)
    
-   phased_geno = Phase(path(genotype), path(map), path(beagle), chromosomes)
+   phased_geno = Phase()
 }
