@@ -17,21 +17,27 @@ process Phase {
 
    
    input:
+   val phasestep
    tuple path(genotype), path(map), path(beagle), path(out)
    each chromosome
 
    output:
-   tuple val(chromosome), path("${out}/${genotype}.chr${chromosome}.phased"), path(beagle), path(map), path(out)
+   tuple val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
       
    script:
-   if( CHR == "True" )
+   if( CHR == "True" && phasestep == 1)
    	"""
-   	java -jar ${beagle} gt=${genotype} out=${out}/${genotype}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=8 
+   	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=8 
    	"""
-    else
+   if(CHR != "True" && phasestep == 1)
     	"""
-	java -jar ${beagle} gt=${genotype} out=${out}/${genotype}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
+	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
 	"""
+   else //don't phase, just output the tuple while changing the input vcf name
+   	"""
+	cp ${genotype} ${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz
+	"""
+   
 }
 
 
@@ -184,6 +190,7 @@ process RemoveGaps {
 workflow {
    
    chromosomes = Channel.from(params.chromosomes)
-   
-   phased_geno = Phase()
+   phasingStep = Channel.from(params.phasingStep)
+   phased_geno = Phase(phasingStep, )
+   groupTuple()
 }
