@@ -98,23 +98,19 @@ process PhaseIBD {
    cache "lenient"
    scratch true
 
+   beforeScript "source ${params.virtualenv}"
    
    input:
    tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
    path(phaseibd)
    path(gap)
+   env HGREF
    val removegap
 
    output:
    path("${chromosome}.nogap.header.ibd.gz")
    
-   script:
-   if (param.phased == FLASE) {
-      """
-      #launch Phase process
-      """
-   }
-   //then launch the hap-ibd program
+ 
    """   
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
    plink --vcf ${genotype} --cm-map ${map} ${chromsome} --make-bed --out ${TMPDIR}.${chromosome}.custom
