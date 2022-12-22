@@ -104,7 +104,6 @@ process PhaseIBD {
    tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
    path(phaseibd)
    path(gap)
-   env HGREF
    val removegap
 
    output:
@@ -144,9 +143,20 @@ process PhaseIBD {
 	
 	
 workflow {
-   
    chromosomes = Channel.from(params.chromosomes)
    phasingStep = Channel.from(params.phasingStep)
-   phased_geno = Phase(phasingStep, )
-   groupTuple()
+   removegaps = Channel.from(params.removeGaps)
+   
+   genotypes = Channel.fromPath(params.genoFile)
+   workdir = Channel.fromPath(params.workingDir)
+   beagle =  Channel.fromPath(params.beagleDir)
+   phaseIBD = Channel.fromPath(params.phaseibd)
+   hapIBD = Channel.fromPath(params.hapibd)
+   geneticmap = Channel.fromPath(params.geneticMap)
+   gaps = Channel.fromPath(params.gapfile)
+   
+   
+   phased_geno = Phase(phasingStep, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
+   hapIBD_segments = HapIBD(phased_geno, hapIBD, gaps, removegaps)
+   phaseIBD_segments = PhaseIBD(phased_geno, phaseIBD, gaps, removegaps)
 }
