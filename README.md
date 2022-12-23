@@ -90,7 +90,7 @@ chr*.nogap.phaseibd.header.ibd.gz
 EXAMPLES
 -----------
 
-> python3 CERC_vcf_annotation.py -f <VCF_filename>.vcf.gz -g <GENCODE_filename>.gtf.gz -o "output"
+> 
 
 
 
