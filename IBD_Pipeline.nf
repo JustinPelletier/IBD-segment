@@ -57,7 +57,7 @@ process HapIBD {
    val removegap
    
    output:
-   path("$$out/chr*.header.ibd.gz")
+   path("$$out/chr*.hapibd.header.ibd.gz")
    
    script:
    if (param.phased == FLASE) {
@@ -83,13 +83,13 @@ process HapIBD {
 	   done <$FILENAME
 	   
 	   #add header to the ibd output file
-   	   cat header.tmp $out/chr${chromosome}.ibd > $out/chr${chromosome}.nogap.ibd
-   	   bgzip -f $out/chr${chromosome}.nogap.header.ibd
+   	   cat header.tmp $out/chr${chromosome}.ibd > $out/chr${chromosome}.nogap.hapibd.header.ibd
+   	   bgzip -f $out/chr${chromosome}.nogap.hapibd.header.ibd
 	   
    else
    	#add header to the ibd output file
-   	cat header.tmp $out/chr${chromosome}.ibd > $out/chr${chromosome}.ibd
-   	bgzip -f $$out/chr${chromosome}.header.ibd
+   	cat header.tmp $out/chr${chromosome}.ibd > $out/chr${chromosome}.hapibd.header.ibd
+   	bgzip -f $$out/chr${chromosome}.hapibd.header.ibd
    
    fi
    """   
@@ -114,7 +114,7 @@ process PhaseIBD {
    val removegap
 
    output:
-   path("${out}/chr*.header.ibd.gz")
+   path("${out}/chr*.phaseibd.header.ibd.gz")
    
  
    """   
@@ -142,12 +142,12 @@ process PhaseIBD {
 	done <$FILENAME
 	
 	#add header to the ibd output file
-   	cat ${out}/${chromosome}.ibd.header ${out}/${chromosome}.ibd > ${out}/chr${chromosome}.nogap.header.ibd
-   	bgzip -f ${out}/chr${chromosome}.nogap.header.ibd
+   	cat ${out}/${chromosome}.ibd.header ${out}/${chromosome}.ibd > ${out}/chr${chromosome}.nogap.phaseibd.header.ibd
+   	bgzip -f ${out}/chr${chromosome}.nogap.phaseibd.header.ibd
    else
    	#add header to the ibd output file
-	mv {out}/${chromosome}.ibd {out}/chr${chromosome}.header.ibd
-   	bgzip -f ${out}/chr${chromosome}.header.ibd
+	mv {out}/${chromosome}.ibd {out}/chr${chromosome}.phaseibd.header.ibd
+   	bgzip -f ${out}/chr${chromosome}.phaseibd.header.ibd
    fi
    """   
 }
