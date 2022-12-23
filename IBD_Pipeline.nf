@@ -25,11 +25,11 @@ process Phase {
    tuple val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
       
    script:
-   if( CHR == "True" && phasestep == 1)
+   if( CHR == 1 && phasestep == 1)
    	"""
    	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=8 
    	"""
-   if(CHR != "True" && phasestep == 1)
+   if(CHR == 0 && phasestep == 1)
     	"""
 	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
 	"""
