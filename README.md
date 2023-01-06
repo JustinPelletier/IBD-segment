@@ -30,7 +30,7 @@ Installation of hap-ibd (https://github.com/browning-lab/hap-ibd)
 > wget https://faculty.washington.edu/browning/hap-ibd.jar
 
 
-Installation of phaseibd as a python module(https://github.com/23andMe/phasedibd) 
+Installation of phaseibd as a python module (https://github.com/23andMe/phasedibd) 
 > make
 > python setup.py install 
 > python tests/unit_tests.py
@@ -67,12 +67,6 @@ RUNNING
 
     Important: when working on Compute Canada HPC, set working directory to ~/scratch/<new directory name>. This will speed up IO and also save space on your project partition. After the execution, if there were no errors and you are happy with the results, you can remove this working directory.
 
-
-
-OPTIONS
------------
-
-List of possible options;
 
 
 
