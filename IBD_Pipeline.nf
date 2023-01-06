@@ -70,6 +70,7 @@ process HapIBD {
    java -Xmx100g -jar ${hapibd} gt=${genotype} out=$out/chr${chromosome} map=${map} nthreads=8 
    gunzip $out/chr${chromosome}.ibd.gz
    
+   #add header to the output file
    echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH"  > header.tmp
    
    #remove IBD overlapping gaps in the genome and AccessibilityMask
