@@ -18,6 +18,7 @@ process Phase {
    
    input:
    val phasestep
+   val prefix
    tuple path(genotype), path(map), path(beagle), path(out)
    each chromosome
 
@@ -25,11 +26,11 @@ process Phase {
    tuple val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
       
    script:
-   if( CHR == 1 && phasestep == 1)
+   if( prefix == 1 && phasestep == 1)
    	"""
    	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=8 
    	"""
-   if(CHR == 0 && phasestep == 1)
+   if( prefix == 0 && phasestep == 1)
     	"""
 	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
 	"""
@@ -160,6 +161,7 @@ workflow {
    chromosomes = Channel.from(params.chromosomes)
    phasingStep = Channel.from(params.phasingStep)
    removegaps = Channel.from(params.removeGaps)
+   chromosomePrefix = Channel.from(params.chromosomePrefix)
    
    genotypes = Channel.fromPath(params.genoFile)
    workdir = Channel.fromPath(params.workingDir)
@@ -170,7 +172,7 @@ workflow {
    gaps = Channel.fromPath(params.gapfile)
    
    
-   phased_geno = Phase(phasingStep, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
+   phased_geno = Phase(phasingStep, chromosomePrefix, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), val(prefrix), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
    hapIBD_segments = HapIBD(phased_geno, hapIBD, gaps, removegaps)
    phaseIBD_segments = PhaseIBD(phased_geno, phaseIBD, gaps, removegaps)
 }
