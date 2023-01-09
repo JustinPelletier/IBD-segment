@@ -58,7 +58,7 @@ process HapIBD {
    val removegap
    
    output:
-   path("$$out/chr*.hapibd.header.ibd.gz")
+   path("$out/chr*.hapibd.header.ibd.gz")
    
    script:
    if (param.phased == FLASE) {
