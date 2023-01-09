@@ -51,7 +51,7 @@ RUNNING
         params.beagleDir -- path to beagle executable java (.jar) file
         params.phaseibd -- path to phaseibd python custom script (phaseibd_chr.py) file that is this github repository
         params.hapibd -- path to hap-ibd executable java (.jar) file
-        params.geneticMap -- path to the genetic map of your choice (GRCh36, GRCh37 or GRCh38) available in this repository
+        params.geneticMap -- path to the genetic map of your choice (GRCh36, GRCh37 or GRCh38) available in this repository (grch38 with hapmap with and without chromosome prefix are available in this repository : (NAME OF THE .ZIP FILES)
         params.gapfile -- path to bed file with intervals to remove from the IBD segments
         params.phasingStep -- Specify if your data is phased (0) or if you want to phase it (1)
         params.chromosomePrefix -- Specify if your genotype file (genoFile) has "chr" as chromosome prefix (1) or not (0)
