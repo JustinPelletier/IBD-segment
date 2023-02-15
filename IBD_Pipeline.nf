@@ -148,17 +148,17 @@ process PhaseIBD {
 	
 workflow {
    chromosomes = Channel.from(params.chromosomes)
-   phasingStep = Channel.from(params.phasingStep)
+   phasingStep = Channel.from(params.phasingStep
    removegaps = Channel.from(params.removeGaps)
    chromosomePrefix = Channel.from(params.chromosomePrefix)
    
-   genotypes = Channel.fromPath(params.genoFile)
-   workdir = Channel.fromPath(params.workingDir)
-   beagle =  Channel.fromPath(params.beagleDir)
-   phaseIBD = Channel.fromPath(params.phaseibd)
-   hapIBD = Channel.fromPath(params.hapibd)
-   geneticmap = Channel.fromPath(params.geneticMap)
-   gaps = Channel.fromPath(params.gapfile)
+   genotypes = Channel.fromPath(params.genoFile, checkIfExists : true)
+   workdir = Channel.fromPath(params.workingDir, checkIfExists : true)
+   beagle =  Channel.fromPath(params.beagleDir, checkIfExists : true)
+   phaseIBD = Channel.fromPath(params.phaseibd, checkIfExists : true)
+   hapIBD = Channel.fromPath(params.hapibd, checkIfExists : true)
+   geneticmap = Channel.fromPath(params.geneticMap, checkIfExists : true)
+   gaps = Channel.fromPath(params.gapfile, checkIfExists : true)
    
    
    phased_geno = Phase(phasingStep, chromosomePrefix, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), val(prefrix), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
