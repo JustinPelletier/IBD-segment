@@ -9,8 +9,6 @@
 
 process Phase { 
    errorStrategy "finish"
-   cache "lenient"
-   scratch true
    
    input:
    val phasestep
@@ -40,8 +38,6 @@ process Phase {
 
 process HapIBD {  
    errorStrategy "finish"
-   cache "lenient"
-   scratch true
    
    input:
    tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
@@ -93,8 +89,6 @@ process HapIBD {
 
 process PhaseIBD {  
    errorStrategy "finish"
-   cache "lenient"
-   scratch true
 
    beforeScript "source ${params.virtualenv}"
    
