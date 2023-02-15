@@ -7,14 +7,10 @@
 */
 
 
-process Phase {  
-   memory "16 GB"
-   time "4h"
+process Phase { 
    errorStrategy "finish"
    cache "lenient"
    scratch true
-   cpus $task.cpus
-
    
    input:
    val phasestep
@@ -43,12 +39,9 @@ process Phase {
 
 
 process HapIBD {  
-   memory "16 GB"
-   time "4h"
    errorStrategy "finish"
    cache "lenient"
    scratch true
-   cpus $task.cpus
    
    input:
    tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
@@ -99,12 +92,9 @@ process HapIBD {
 
 
 process PhaseIBD {  
-   memory "16 GB"
-   time "4h"
    errorStrategy "finish"
    cache "lenient"
    scratch true
-   cpus $task.cpus
 
    beforeScript "source ${params.virtualenv}"
    
