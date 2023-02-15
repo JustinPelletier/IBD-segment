@@ -11,11 +11,11 @@ process Phase {
    errorStrategy "finish"
    
    input:
+   val chromosome
    val phasestep
    val prefix
    tuple path(genotype), path(map), path(beagle), path(out)
-   each chromosome
-
+	
    output:
    tuple val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
       
@@ -155,7 +155,16 @@ workflow {
    gaps = Channel.fromPath(params.gapfile, checkIfExists : true)
    
    
-   phased_geno = Phase(phasingStep, chromosomePrefix, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), val(prefrix), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
-   hapIBD_segments = HapIBD(phased_geno, hapIBD, gaps, removegaps)
-   phaseIBD_segments = PhaseIBD(phased_geno, phaseIBD, gaps, removegaps)
+  
+   if (phasingStep == true) { 
+       phased_geno = Phase(chromosomes, phasingStep, chromosomePrefix, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), val(prefrix), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
+       hapIBD_segments = HapIBD(phased_geno, hapIBD, gaps, removegaps)
+       phaseIBD_segments = PhaseIBD(phased_geno, phaseIBD, gaps, removegaps)
+   }
+   else { 
+       hapIBD_segments = HapIBD(genotypes, hapIBD, gaps, removegaps)
+       phaseIBD_segments = PhaseIBD(genotypes, phaseIBD, gaps, removegaps)
+   }
+   
+   
 }
