@@ -46,9 +46,9 @@ BIN
 ------------
 
 The ```bin``` folder contains executables for 
-beagle
-hap-ibd
-phaseibd 
+- beagle
+- hap-ibd
+- phaseibd 
 
 The ```genetic_map``` folder containing the GRCh38 genetic maps from the HapMap project (https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/).
 
