@@ -91,11 +91,11 @@ OUTPUTS
 -----------
 
 
-chr*.hapibd.header.ibd.gz -- hap-ibd IBD segment (with or without gaps)
-chr*.nogap.hapibd.header.ibd.gz
+```chr*.hapibd.header.ibd.gz``` -- hap-ibd IBD segment (with or without gaps)
+```chr*.nogap.hapibd.header.ibd.gz```
 
-chr*.phaseibd.header.ibd.gz -- phaseibd IBD segment detected (with or without gaps)
-chr*.nogap.phaseibd.header.ibd.gz
+```chr*.phaseibd.header.ibd.gz``` -- phaseibd IBD segment detected (with or without gaps)
+```chr*.nogap.phaseibd.header.ibd.gz```
 
 
 EXAMPLES
