@@ -41,6 +41,11 @@ Installation of phaseibd as a python module (https://github.com/23andMe/phasedib
 > python tests/unit_tests.py
 
 
+REQUIREMENTS
+------------
+
+The bin folder contains executables for beagle, hap-ibd and phaseibd as well as a "genetic_map" folder containing the GRCh38 genetic maps from the HapMap project (https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/).
+
 
 RUNNING
 ------------
