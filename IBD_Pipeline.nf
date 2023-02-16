@@ -25,7 +25,7 @@ process Phase {
    	"""
    if( prefix == 0 && phasestep == 1)
     	"""
-	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=$task.cpus
+	java -jar ${beagle} gt=${genotype} out=${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=$task.cpus
 	"""
 }
 
