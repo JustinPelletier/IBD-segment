@@ -9,30 +9,25 @@
 
 process Phase { 
    errorStrategy "finish"
+   cpus 8
    
    input:
-   val chromosome
-   val phasestep
+   each chromosome
    val prefix
-   tuple path(genotype), path(map), path(beagle), path(out)
+   tuple path(genotype), path(map), path(beagle)
 	
    output:
-   tuple val(chromosome), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
+   tuple val(chromosome), path("${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz")
       
    script:
    if( prefix == 1 && phasestep == 1)
    	"""
-   	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=8 
+   	java -jar ${beagle} gt=${genotype} out=${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=$task.cpus
    	"""
    if( prefix == 0 && phasestep == 1)
     	"""
 	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
 	"""
-   else //don't phase, just output the tuple while changing the input vcf name
-   	"""
-	cp ${genotype} ${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz
-	"""
-   
 }
 
 
@@ -40,7 +35,7 @@ process HapIBD {
    errorStrategy "finish"
    
    input:
-   tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
+   tuple val(chromosome), path(genotype)
    path(hapibd)
    path(gap)
    val removegap
@@ -93,7 +88,7 @@ process PhaseIBD {
    beforeScript "source ${params.virtualenv}"
    
    input:
-   tuple val(chromosome), path(genotype), path(beagle), path(map), path(out)
+   tuple val(chromosome), path(genotype)
    path(phaseibd)
    path(gap)
    val removegap
@@ -157,7 +152,7 @@ workflow {
    
   
    if (phasingStep == true) { 
-       phased_geno = Phase(chromosomes, phasingStep, chromosomePrefix, [genotypes, geneticmap, beagle, workdir], chromosomes ) //val(chromosome), val(prefrix), path("${out}/${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz"), path(beagle), path(map), path(out)
+       phased_geno = Phase(chromosomes, chromosomePrefix, [genotypes, geneticmap, beagle])
        hapIBD_segments = HapIBD(phased_geno, hapIBD, gaps, removegaps)
        phaseIBD_segments = PhaseIBD(phased_geno, phaseIBD, gaps, removegaps)
    }
