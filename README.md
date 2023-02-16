@@ -6,15 +6,15 @@ Identical By Descent (IBD) segment detection
 INTRODUCTION
 ------------
 
-CERC-Genomic-Medecine (https://github.com/CERC-Genomic-Medicine)
+[CERC-Genomic-Medecine](https://github.com/CERC-Genomic-Medicine)
 
 This pipeline identifies IBD segments in genetic data (sequencing or genotyping).
 
-Run Beagle phasing if input data is unphased (https://faculty.washington.edu/browning/beagle/beagle.html#download)
+Run [Beagle](https://faculty.washington.edu/browning/beagle/beagle.html#download) phasing if input data is unphased 
 
-Run hap-ibd (https://github.com/browning-lab/hap-ibd)
+Run [hap-ibd](https://github.com/browning-lab/hap-ibd)
 
-Run phaseibd (https://github.com/23andMe/phasedibd) 
+Run [phaseibd](https://github.com/23andMe/phasedibd) 
 
 
 
@@ -29,13 +29,13 @@ module load plink/1.9b_6.21-x86_64
 
 Python 3.9.6
 
-Installation of Beagle for phasing (http://faculty.washington.edu/browning/beagle/beagle.html)
+Installation of [Beagle](http://faculty.washington.edu/browning/beagle/beagle.html) for phasing 
 
-Installation of hap-ibd (https://github.com/browning-lab/hap-ibd)
+Installation of [hap-ibd](https://github.com/browning-lab/hap-ibd)
 > wget https://faculty.washington.edu/browning/hap-ibd.jar
 
 
-Installation of phaseibd as a python module (https://github.com/23andMe/phasedibd) 
+Installation of [phaseibd](https://github.com/23andMe/phasedibd). as a python module: 
 > make
 > python setup.py install 
 > python tests/unit_tests.py
@@ -45,7 +45,12 @@ Installation of phaseibd as a python module (https://github.com/23andMe/phasedib
 BIN
 ------------
 
-The bin folder contains executables for beagle, hap-ibd and phaseibd as well as a "genetic_map" folder containing the GRCh38 genetic maps from the HapMap project (https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/).
+The ```bin``` folder contains executables for 
+beagle
+hap-ibd
+phaseibd 
+
+The ```genetic_map``` folder containing the GRCh38 genetic maps from the HapMap project (https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/).
 
 
 
@@ -103,6 +108,6 @@ EXAMPLES
 
 AUTHOR
 -----------
-PELLETIER Justin (https://www.genomic-medicine-cerc.online/current-team)
+[PELLETIER Justin](https://www.genomic-medicine-cerc.online/current-team)
 
 email: justin.pelletier2@mcgill.ca
