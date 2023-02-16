@@ -24,6 +24,9 @@ REQUIREMENTS
 Nextflow (tested with version 21)
 module load tabix/0.2.6
 
+Plink1 (recommended 1.9 version)
+module load plink/1.9b_6.21-x86_64
+
 Python 3.9.6
 
 Installation of hap-ibd (https://github.com/browning-lab/hap-ibd)
