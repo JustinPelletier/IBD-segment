@@ -29,6 +29,8 @@ module load plink/1.9b_6.21-x86_64
 
 Python 3.9.6
 
+Installation of Beagle for phasing (http://faculty.washington.edu/browning/beagle/beagle.html)
+
 Installation of hap-ibd (https://github.com/browning-lab/hap-ibd)
 > wget https://faculty.washington.edu/browning/hap-ibd.jar
 
