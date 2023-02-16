@@ -9,7 +9,6 @@
 
 process Phase { 
    errorStrategy "finish"
-   cpus 8
    
    input:
    each chromosome
@@ -26,13 +25,14 @@ process Phase {
    	"""
    if( prefix == 0 && phasestep == 1)
     	"""
-	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=8
+	java -jar ${beagle} gt=${genotype} out=${out}/${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=$task.cpus
 	"""
 }
 
 
 process HapIBD {  
    errorStrategy "finish"
+   publishDir 'Results', pattern: '*.hapibd.header.ibd.gz', mode: "copy"
    
    input:
    tuple val(chromosome), path(genotype)
@@ -44,20 +44,14 @@ process HapIBD {
    path("$out/chr*.hapibd.header.ibd.gz")
    
    script:
-   if (param.phased == FLASE) {
-      """
-      #launch Phase process
-      """
-   }
-   //then launch the hap-ibd program
    """   
-   java -Xmx100g -jar ${hapibd} gt=${genotype} out=$out/chr${chromosome} map=${map} nthreads=8 
+   java -Xmx100g -jar ${hapibd} gt=${genotype} out=$out/chr${chromosome} map=${map} nthreads=$task.cpus
    gunzip $out/chr${chromosome}.ibd.gz
    
    #add header to the output file
    echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH"  > header.tmp
    
-   #remove IBD overlapping gaps in the genome and AccessibilityMask
+   #remove IBD overlapping gaps in the genome
    if [ removegap == 1 ]
    then
 	   FILENAME=${gap}
@@ -84,7 +78,7 @@ process HapIBD {
 
 process PhaseIBD {  
    errorStrategy "finish"
-
+   publishDir 'Results', pattern: '*.phaseibd.header.ibd.gz', mode: "copy"
    beforeScript "source ${params.virtualenv}"
    
    input:
@@ -94,13 +88,15 @@ process PhaseIBD {
    val removegap
 
    output:
-   path("${out}/chr*.phaseibd.header.ibd.gz")
+   path("chr*.phaseibd.header.ibd.gz")
    
  
-   """   
+   """
+   module load plink
+   
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
-   plink --vcf ${genotype} --cm-map ${map} ${chromsome} --make-bed --out ${TMPDIR}.${chromosome}.custom
-   awk '{print $1" . "$3" "$4}' ${TMPDIR}.${chromosome}.custom.bim > ${map}.${chromosome}.custom.map
+   plink --vcf ${genotype} --cm-map ${map} ${chromsome} --make-bed --out ${chromosome}.custom
+   awk '{print $1" . "$3" "$4}' ${chromosome}.custom.bim > ${map}.${chromosome}.custom.map
    
    echo "index,VCF_ID" | sed 's/,/\t/g' > ${genotype}.id
    bcftools query -l ${genotype} | awk '{print int((NR-1)) " " $0}' | sed 's/ /\t/g' >> ${genotype}.id
@@ -108,7 +104,7 @@ process PhaseIBD {
    python3 ${phaseibd} ${genotype} ${chromosome} ${out} ${map}.${chromosome}.custom.map ${genotype}.id
    
    
-   #remove IBD overlapping gaps in the genome and AccessibilityMask
+   #remove IBD overlapping gaps in the genome
    if [ removegap == 1 ]
    then
    	head -1 ${out}/${chromosome}.ibd > ${out}/${chromosome}.ibd.header
