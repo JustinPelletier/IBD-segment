@@ -50,7 +50,7 @@ The ```bin``` folder contains executables for
 - hap-ibd
 - phaseibd 
 
-The ```genetic_map``` folder containing the GRCh38 genetic maps from the HapMap project (https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/).
+The ```HapMap``` folder containing the GRCh38 genetic maps from the [HapMap project](https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/) in gmap format.
 
 
 
