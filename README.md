@@ -44,7 +44,6 @@ BIN
 ------------
 
 The ```bin``` folder contains executables for 
-- beagle
 - hap-ibd
 - phaseibd 
 
@@ -63,7 +62,6 @@ RUNNING
         params.workingDir -- path to the working output directory
         params.virtualenv -- path to the virtual environment where to run phaseibd in python
         params.genoFile -- path to your VCF file. You can use glob expressions to selecect multiple files.
-        params.beagleDir -- path to beagle executable java (.jar) file
         params.phaseibd -- path to phaseibd python custom script (phaseibd_chr.py) file that is this github repository
         params.hapibd -- path to hap-ibd executable java (.jar) file
         params.geneticMap -- path to the genetic map of your choice (GRCh36, GRCh37 or GRCh38) available in this repository (grch38 with hapmap with and without chromosome prefix are available in this repository : (NAME OF THE .ZIP FILES)
@@ -77,7 +75,6 @@ RUNNING
     Run pipeline:
 
     module load nextflow
-    module load singularity
     nextflow run IBD_Pipeline.nf -w ~/scratch/workingDirectory
 
     Important: when working on Compute Canada HPC, set working directory to ~/scratch/<new directory name>. This will speed up IO and also save space on your project partition. After the execution, if there were no errors and you are happy with the results, you can remove this working directory.
