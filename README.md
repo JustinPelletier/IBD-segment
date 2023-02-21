@@ -8,9 +8,8 @@ INTRODUCTION
 
 [CERC-Genomic-Medecine](https://github.com/CERC-Genomic-Medicine)
 
-This pipeline identifies IBD segments in genetic data (sequencing or genotyping).
-
-Run [Beagle](https://faculty.washington.edu/browning/beagle/beagle.html#download) phasing if input data is unphased 
+This pipeline identifies IBD segments in phased genetic data (sequencing or genotyping).
+For phasing, refer to the [Beagle pipeline](https://github.com/CERC-Genomic-Medicine/beagle_phasing/tree/main/phase_with_reference)
 
 Run [hap-ibd](https://github.com/browning-lab/hap-ibd)
 
@@ -29,7 +28,6 @@ module load plink/1.9b_6.21-x86_64
 
 Python 3.9.6
 
-Installation of [Beagle](http://faculty.washington.edu/browning/beagle/beagle.html) for phasing 
 
 Installation of [hap-ibd](https://github.com/browning-lab/hap-ibd)
 > wget https://faculty.washington.edu/browning/hap-ibd.jar
