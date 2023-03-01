@@ -1,5 +1,3 @@
-!/usr/bin/env nextflow
-
 /*
 * AUTHOR: Justin Pelletier, MSc <justin.pelletier2@mcgill.ca>
 * VERSION: 1.0
@@ -7,155 +5,151 @@
 */
 
 
-process Phase { 
-   errorStrategy "finish"
-   
-   input:
-   each chromosome
-   val prefix
-   tuple path(genotype), path(map), path(beagle)
-	
-   output:
-   tuple val(chromosome), path("${genotype.getSimpleName()}.chr${chromosome}.phased.vcf.gz")
-      
-   script:
-   if( prefix == true)
-   	"""
-   	java -jar ${beagle} gt=${genotype} out=${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/plink.${chromosome}.GRCh38.map nthreads=$task.cpus
-   	"""
-   if( prefix == false)
-    	"""
-	java -jar ${beagle} gt=${genotype} out=${genotype.getSimpleName()}.chr${chromosome}.phased map=${map}/no_chr_plink.${chromosome}.GRCh38.map nthreads=$task.cpus
-	"""
-}
 
-
-process HapIBD {  
+process HapIBD {
    errorStrategy "finish"
    publishDir 'Results', pattern: '*.hapibd.header.ibd.gz', mode: "copy"
-   
+   beforeScript 'module load bcftools'
+
    input:
-   tuple val(chromosome), path(genotype)
-   path(hapibd)
-   path(gap)
-   val removegap
-   
+   tuple val(chromosome), path(genotype), path(map), path(hapibd), path(gap), val(removegap)
+
    output:
-   path("$out/chr*.hapibd.header.ibd.gz")
-   
+   tuple val(chromosome), path("*.hapibd.header.ibd.gz")
+
    script:
-   """   
-   java -Xmx100g -jar ${hapibd} gt=${genotype} out=$out/chr${chromosome} map=${map} nthreads=$task.cpus
-   gunzip $out/chr${chromosome}.ibd.gz
-   
+   """
+   java -Xmx100g -jar ${hapibd} gt=${genotype} out=${genotype.getBaseName()} map=${map} nthreads=$task.cpus
+   gunzip ${genotype.getBaseName()}.ibd.gz
+
    #add header to the output file
    echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH"  > header.tmp
-   
+
    #remove IBD overlapping gaps in the genome
-   if [ removegap == 1 ]
+   if [ ${removegap} == "true" ]
    then
-	   FILENAME=${gap}
-	   IFS=$'\t'
-	   while read CHOM START END TYPE; do
-		awk -v a=$START -v b=$END '{ if (!( ($6<=a && $7>=a) || ($6<=b && $7>=b) || ($6>=a && $7<=b) )) { print }}' $out/chr${chromosome}.ibd > $out/chr${chromosome}.ibd.tmp
-		mv $out/chr${chromosome}.ibd.tmp $out/chr${chromosome}.ibd
-	   done <$FILENAME
-	   
-	   #add header to the ibd output file
-   	   cat header.tmp $out/chr${chromosome}.ibd > $out/chr${chromosome}.nogap.hapibd.header.ibd
-   	   bgzip -f $out/chr${chromosome}.nogap.hapibd.header.ibd
-	   
+           FILENAME=${gap}
+           IFS=\$'\t'
+           while read CHOM START END TYPE; do
+                awk -v a=\$START -v b=\$END '{ if (!( (\$6<=a && \$7>=a) || (\$6<=b && \$7>=b) || (\$6>=a && \$7<=b) )) { print }}' ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.tmp
+                mv ${genotype.getBaseName()}.ibd.tmp ${genotype.getBaseName()}.ibd
+           done < \$FILENAME
+
+           #add header to the ibd output file
+           cat header.tmp ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.nogap.hapibd.header.ibd
+           bgzip -f ${genotype.getBaseName()}.nogap.hapibd.header.ibd
+
    else
-   	#add header to the ibd output file
-   	cat header.tmp $out/chr${chromosome}.ibd > $out/chr${chromosome}.hapibd.header.ibd
-   	bgzip -f $$out/chr${chromosome}.hapibd.header.ibd
-   
+        #add header to the ibd output file
+        cat header.tmp ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.hapibd.header.ibd
+        bgzip -f ${genotype.getBaseName()}.hapibd.header.ibd
+
    fi
-   """   
+   """
 }
 
+process PhaseIBD {
+   cpus 1
+   time = "1h"
+   memory = "5GB"
 
-
-process PhaseIBD {  
    errorStrategy "finish"
    publishDir 'Results', pattern: '*.phaseibd.header.ibd.gz', mode: "copy"
-   beforeScript "source ${params.virtualenv}"
-   
+   beforeScript "source ${params.virtualenv} ; module load plink/1.9b_6.21-x86_64 ; module load bcftools"
+
+
    input:
-   tuple val(chromosome), path(genotype)
-   path(phaseibd)
-   path(gap)
-   val removegap
+   tuple val(chromosome), path(genotype), path(map), path(phaseibd), path(gap), val(removegap)
 
    output:
-   path("chr*.phaseibd.header.ibd.gz")
-   
- 
+   tuple val(chromosome), path("chr*.phaseibd.header.ibd.gz")
+
+
    """
-   module load plink
-   
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
-   plink --vcf ${genotype} --cm-map ${map} ${chromsome} --make-bed --out ${chromosome}.custom
-   awk '{print $1" . "$3" "$4}' ${chromosome}.custom.bim > ${map}.${chromosome}.custom.map
-   
+   #plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
+   #awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
+
    echo "index,VCF_ID" | sed 's/,/\t/g' > ${genotype}.id
-   bcftools query -l ${genotype} | awk '{print int((NR-1)) " " $0}' | sed 's/ /\t/g' >> ${genotype}.id
-   
-   python3 ${phaseibd} ${genotype} ${chromosome} ${out} ${map}.${chromosome}.custom.map ${genotype}.id
-   
-   
+   bcftools query -l ${genotype} | awk '{print int((NR-1)) " " \$0}' | sed 's/ /\t/g' >> ${genotype}.id
+
+   #Unzip the vcf for phaseIBD to run
+   gunzip -c ${genotype} > ${genotype.getBaseName()}
+
+   python3 ${phaseibd} ${genotype.getBaseName()} ${chromosome} ${genotype.getBaseName()} ${map} ${genotype}.id
+
+
    #remove IBD overlapping gaps in the genome
-   if [ removegap == 1 ]
+   if [ ${removegap} == "true" ]
    then
-   	head -1 ${out}/${chromosome}.ibd > ${out}/${chromosome}.ibd.header
-   	sed -i '1d' ${out}/${chromosome}.ibd
-	
-   	FILENAME=${gap}
-	IFS=$'\t'
-	while read CHOM START END TYPE; do
-		awk -v a=$START -v b=$END '{ if (!( ($10<=a && $11>=a) || ($10<=b && $11>=b) || ($10>=a && $11<=b) )) { print }}' ${out}/${chromosome}.ibd > ${out}/${chromosome}.ibd.tmp
-		mv ${out}/${chromosome}.ibd.tmp ${out}/${chromosome}.ibd
-	done <$FILENAME
-	
-	#add header to the ibd output file
-   	cat ${out}/${chromosome}.ibd.header ${out}/${chromosome}.ibd > ${out}/chr${chromosome}.nogap.phaseibd.header.ibd
-   	bgzip -f ${out}/chr${chromosome}.nogap.phaseibd.header.ibd
+           head -1 ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.header
+           sed -i '1d' ${genotype.getBaseName()}.ibd
+
+           FILENAME=${gap}
+           IFS=\$'\t'
+           while read CHOM START END TYPE; do
+                awk -v a=\$START -v b=\$END '{ if (!( (\$6<=a && \$7>=a) || (\$6<=b && \$7>=b) || (\$6>=a && \$7<=b) )) { print }}' ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.tmp
+                mv ${genotype.getBaseName()}.ibd.tmp ${genotype.getBaseName()}.ibd
+           done < \$FILENAME
+
+           cat ${genotype.getBaseName()}.ibd.header ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.nogap.phaseibd.ibd
+           bgzip -f ${genotype.getBaseName()}.nogap.phaseibd.ibd
+
    else
-   	#add header to the ibd output file
-	mv {out}/${chromosome}.ibd {out}/chr${chromosome}.phaseibd.header.ibd
-   	bgzip -f ${out}/chr${chromosome}.phaseibd.header.ibd
+        mv ${genotype.getBaseName()}.ibd ${genotype.getBaseName()}.phaseibd.ibd
+        bgzip -f ${genotype.getBaseName()}.phaseibd.ibd
+
+
    fi
-   """   
+
+   """
 }
 
 
-	
-	
+
+process geneticMap {
+   errorStrategy "finish"
+   beforeScript "module load plink/1.9b_6.21-x86_64"
+
+
+   input:
+   tuple val(chromosome), path(genotype), path(map), path(hapibd),path(gap), val(removegap)
+
+   output:
+   tuple val(chromosome), path(genotype), path("*.custom.map"), path(hapibd), path(gap), val(removegap)
+
+   """
+   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
+   plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
+   awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
+
+   """
+
+
+}
+
 workflow {
-   chromosomes = Channel.from(params.chromosomes)
-   phasingStep = Channel.from(params.phasingStep
-   removegaps = Channel.from(params.removeGaps)
-   chromosomePrefix = Channel.from(params.chromosomePrefix)
-   
-   genotypes = Channel.fromPath(params.genoFile, checkIfExists : true)
-   workdir = Channel.fromPath(params.workingDir, checkIfExists : true)
-   beagle =  Channel.fromPath(params.beagleDir, checkIfExists : true)
-   phaseIBD = Channel.fromPath(params.phaseibd, checkIfExists : true)
-   hapIBD = Channel.fromPath(params.hapibd, checkIfExists : true)
-   geneticmap = Channel.fromPath(params.geneticMap, checkIfExists : true)
-   gaps = Channel.fromPath(params.gapfile, checkIfExists : true)
-   
-   
-  
-   if (phasingStep == true) { 
-       phased_geno = Phase(chromosomes, chromosomePrefix, [genotypes, geneticmap, beagle])
-       hapIBD_segments = HapIBD(phased_geno, hapIBD, gaps, removegaps)
-       phaseIBD_segments = PhaseIBD(phased_geno, phaseIBD, gaps, removegaps)
-   }
-   else { 
-       hapIBD_segments = HapIBD(genotypes, hapIBD, gaps, removegaps)
-       phaseIBD_segments = PhaseIBD(genotypes, phaseIBD, gaps, removegaps)
-   }
-   
-   
+
+   //genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | HapIBD
+
+   genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | PhaseIBD
+   genetic_map.view()
+
+
+
+   //paf = genetic_map.flatten()
+   //paf = genetic_map.groupTuple().map { file -> [ ${file}, params.hapibd ] }
+   //paf.view()
+
+   //hapibd_out = genetic_map.groupTuple().map { file -> [ $file, params.hapibd ] } | HapIBD
+   //hapibd_out = Channel.from(params.chromosomes).map { chr -> [ "chr${chr}" , params.genoFile + ".chr${chr}.vcf.gz", params.geneticMap + ".chr${chr}." + params.assembly +".map", params.hapibd, params.gapfile, params.removeGaps] } | HapIBD
+   //hapibd_out.view()
+
+   //phaseibd_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz", genetic_map , params.phaseibd, params.gapfile, params.removeGaps] } | PhaseIBD
+   //phaseibd_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz", params.geneticMap + ".chr${chr}." + params.assembly +".map", params.phaseibd, params.gapfile, params.removeGaps] } | PhaseIBD
+   //phaseibd_out.view()
+
+
+
 }
+
