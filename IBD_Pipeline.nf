@@ -133,11 +133,9 @@ process PhaseIBD {
 
 workflow {
 
-   genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | HapIBD
+   hapIBD_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | HapIBD
 
-   genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | PhaseIBD
-   //genetic_map.view()
-
+   phaseIBD_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | PhaseIBD
 
 }
 
