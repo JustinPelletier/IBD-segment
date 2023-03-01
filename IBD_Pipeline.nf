@@ -6,17 +6,16 @@
 
 
 
-
 process geneticMap {
    errorStrategy "finish"
    beforeScript "module load plink/1.9b_6.21-x86_64"
 
 
    input:
-   tuple val(chromosome), path(genotype), path(map), path(hapibd),path(gap), val(removegap)
+   tuple val(chromosome), path(genotype), path(map),path(gap), val(removegap)
 
    output:
-   tuple val(chromosome), path(genotype), path("*.custom.map"), path(hapibd), path(gap), val(removegap)
+   tuple val(chromosome), path(genotype), path("*.custom.map"), path(gap), val(removegap)
 
    """
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
@@ -24,7 +23,10 @@ process geneticMap {
    awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
 
    """
+
+
 }
+
 
 
 
@@ -34,7 +36,8 @@ process HapIBD {
    beforeScript 'module load bcftools'
 
    input:
-   tuple val(chromosome), path(genotype), path(map), path(hapibd), path(gap), val(removegap)
+   tuple val(chromosome), path(genotype), path(map), path(gap), val(removegap)
+   path(hapibd)
 
    output:
    tuple val(chromosome), path("*.hapibd.header.ibd.gz")
@@ -72,6 +75,7 @@ process HapIBD {
 
 
 
+
 process PhaseIBD {
    cpus 1
    time = "1h"
@@ -83,7 +87,8 @@ process PhaseIBD {
 
 
    input:
-   tuple val(chromosome), path(genotype), path(map), path(phaseibd), path(gap), val(removegap)
+   tuple val(chromosome), path(genotype), path(map), path(gap), val(removegap)
+   path(phaseibd)
 
    output:
    tuple val(chromosome), path("*.phaseibd.header.ibd.gz")
@@ -131,11 +136,16 @@ process PhaseIBD {
 
 
 
+
+
 workflow {
 
-   hapIBD_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | HapIBD
+   geneticMaps_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap",  params.gapfile, params.removeGaps] } | geneticMap
 
-   phaseIBD_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | PhaseIBD
+   hapIBD_out =  HapIBD(geneticMaps_out, params.hapibd)
+
+   phaseIBD_out = PhaseIBD(geneticMaps_out, params.phaseibd)
+
 
 }
 
