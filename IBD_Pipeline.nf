@@ -6,6 +6,28 @@
 
 
 
+
+process geneticMap {
+   errorStrategy "finish"
+   beforeScript "module load plink/1.9b_6.21-x86_64"
+
+
+   input:
+   tuple val(chromosome), path(genotype), path(map), path(hapibd),path(gap), val(removegap)
+
+   output:
+   tuple val(chromosome), path(genotype), path("*.custom.map"), path(hapibd), path(gap), val(removegap)
+
+   """
+   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
+   plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
+   awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
+
+   """
+}
+
+
+
 process HapIBD {
    errorStrategy "finish"
    publishDir 'Results', pattern: '*.hapibd.header.ibd.gz', mode: "copy"
@@ -47,6 +69,8 @@ process HapIBD {
    fi
    """
 }
+
+
 
 process PhaseIBD {
    cpus 1
@@ -106,27 +130,6 @@ process PhaseIBD {
 }
 
 
-
-process geneticMap {
-   errorStrategy "finish"
-   beforeScript "module load plink/1.9b_6.21-x86_64"
-
-
-   input:
-   tuple val(chromosome), path(genotype), path(map), path(hapibd),path(gap), val(removegap)
-
-   output:
-   tuple val(chromosome), path(genotype), path("*.custom.map"), path(hapibd), path(gap), val(removegap)
-
-   """
-   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
-   plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
-   awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
-
-   """
-
-
-}
 
 workflow {
 
