@@ -116,12 +116,12 @@ process PhaseIBD {
                 mv ${genotype.getBaseName()}.ibd.tmp ${genotype.getBaseName()}.ibd
            done < \$FILENAME
 
-           cat ${genotype.getBaseName()}.ibd.header ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.nogap.phaseibd.ibd
-           bgzip -f ${genotype.getBaseName()}.nogap.phaseibd.ibd
+           cat ${genotype.getBaseName()}.ibd.header ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.nogap.phaseibd.header.ibd
+           bgzip -f ${genotype.getBaseName()}.nogap.phaseibd.header.ibd
 
    else
-        mv ${genotype.getBaseName()}.ibd ${genotype.getBaseName()}.phaseibd.ibd
-        bgzip -f ${genotype.getBaseName()}.phaseibd.ibd
+        mv ${genotype.getBaseName()}.ibd ${genotype.getBaseName()}.phaseibd.header.ibd
+        bgzip -f ${genotype.getBaseName()}.phaseibd.header.ibd
 
 
    fi
