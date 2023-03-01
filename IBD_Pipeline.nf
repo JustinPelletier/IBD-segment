@@ -133,25 +133,10 @@ process PhaseIBD {
 
 workflow {
 
-   //genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | HapIBD
+   genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | HapIBD
 
    genetic_map = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap", params.phaseibd,  params.gapfile, params.removeGaps] } | geneticMap | PhaseIBD
-   genetic_map.view()
-
-
-
-   //paf = genetic_map.flatten()
-   //paf = genetic_map.groupTuple().map { file -> [ ${file}, params.hapibd ] }
-   //paf.view()
-
-   //hapibd_out = genetic_map.groupTuple().map { file -> [ $file, params.hapibd ] } | HapIBD
-   //hapibd_out = Channel.from(params.chromosomes).map { chr -> [ "chr${chr}" , params.genoFile + ".chr${chr}.vcf.gz", params.geneticMap + ".chr${chr}." + params.assembly +".map", params.hapibd, params.gapfile, params.removeGaps] } | HapIBD
-   //hapibd_out.view()
-
-   //phaseibd_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz", genetic_map , params.phaseibd, params.gapfile, params.removeGaps] } | PhaseIBD
-   //phaseibd_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz", params.geneticMap + ".chr${chr}." + params.assembly +".map", params.phaseibd, params.gapfile, params.removeGaps] } | PhaseIBD
-   //phaseibd_out.view()
-
+   //genetic_map.view()
 
 
 }
