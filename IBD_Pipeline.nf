@@ -86,7 +86,7 @@ process PhaseIBD {
    tuple val(chromosome), path(genotype), path(map), path(phaseibd), path(gap), val(removegap)
 
    output:
-   tuple val(chromosome), path("chr*.phaseibd.header.ibd.gz")
+   tuple val(chromosome), path("*.phaseibd.header.ibd.gz")
 
 
    """
