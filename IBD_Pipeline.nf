@@ -31,7 +31,8 @@ process geneticMap {
 
 
 process HapIBD {
-   errorStrategy "finish"
+   errorStrategy "retry"
+   maxRetries 1
    publishDir 'Results', pattern: '*.hapibd.header.ibd.gz', mode: "copy"
    beforeScript 'module load bcftools'
 
