@@ -117,7 +117,7 @@ process PhaseIBD {
            FILENAME=${gap}
            IFS=\$'\t'
            while read CHOM START END TYPE; do
-                awk -v a=\$START -v b=\$END '{ if (!( (\$6<=a && \$7>=a) || (\$6<=b && \$7>=b) || (\$6>=a && \$7<=b) )) { print }}' ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.tmp
+                awk -v a=\$START -v b=\$END '{ if (!( (\$10<=a && \$11>=a) || (\$10<=b && \$11>=b) || (\$10>=a && \$11<=b) )) { print }}' ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.tmp
                 mv ${genotype.getBaseName()}.ibd.tmp ${genotype.getBaseName()}.ibd
            done < \$FILENAME
 
