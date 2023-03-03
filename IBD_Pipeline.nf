@@ -77,11 +77,12 @@ process HapIBD {
 
 
 process PhaseIBD {
+   time = "2h"
+   memory = "100GB"
    cpus 1
-   time = "1h"
-   memory = "5GB"
 
-   errorStrategy "finish"
+   errorStrategy "retry"
+   maxRetries 1
    publishDir 'Results', pattern: '*.phaseibd.header.ibd.gz', mode: "copy"
    beforeScript "source ${params.virtualenv} ; module load plink/1.9b_6.21-x86_64 ; module load bcftools"
 
@@ -132,6 +133,7 @@ process PhaseIBD {
    fi
 
    """
+
 }
 
 
