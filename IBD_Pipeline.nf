@@ -98,10 +98,7 @@ process PhaseIBD {
 
 
    """
-   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
-   #plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
-   #awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
-
+   
    echo "index,VCF_ID" | sed 's/,/\t/g' > ${genotype}.id
    bcftools query -l ${genotype} | awk '{print int((NR-1)) " " \$0}' | sed 's/ /\t/g' >> ${genotype}.id
 
