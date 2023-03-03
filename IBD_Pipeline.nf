@@ -7,6 +7,10 @@
 
 
 process geneticMap {
+   time = "1h"
+   memory = "5GB"
+   cpus 1
+
    errorStrategy "finish"
    beforeScript "module load plink/1.9b_6.21-x86_64"
 
@@ -21,10 +25,7 @@ process geneticMap {
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
    plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
    awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
-
    """
-
-
 }
 
 
@@ -132,9 +133,7 @@ process PhaseIBD {
 
 
    fi
-
    """
-
 }
 
 
