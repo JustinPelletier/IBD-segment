@@ -1,9 +1,9 @@
+
 /*
 * AUTHOR: Justin Pelletier, MSc <justin.pelletier2@mcgill.ca>
 * VERSION: 1.0
 * YEAR: 2022
 */
-
 
 
 process geneticMap {
@@ -25,9 +25,11 @@ process geneticMap {
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
    plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
    awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
-   """
-}
 
+   """
+
+
+}
 
 
 
@@ -76,8 +78,6 @@ process HapIBD {
 }
 
 
-
-
 process PhaseIBD {
    time = "2h"
    memory = "100GB"
@@ -98,7 +98,10 @@ process PhaseIBD {
 
 
    """
-   
+   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
+   #plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
+   #awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
+
    echo "index,VCF_ID" | sed 's/,/\t/g' > ${genotype}.id
    bcftools query -l ${genotype} | awk '{print int((NR-1)) " " \$0}' | sed 's/ /\t/g' >> ${genotype}.id
 
@@ -130,6 +133,7 @@ process PhaseIBD {
 
 
    fi
+
    """
 }
 
@@ -139,7 +143,7 @@ process PhaseIBD {
 
 workflow {
 
-   geneticMaps_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap",  params.gapfile, params.removeGaps] } | geneticMap
+   geneticMaps_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap",  params.gapfile + params.assembly + ".chr${chr}.gap.bed", params.removeGaps] } | geneticMap
 
    hapIBD_out =  HapIBD(geneticMaps_out, params.hapibd)
 
@@ -147,4 +151,3 @@ workflow {
 
 
 }
-
