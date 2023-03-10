@@ -79,8 +79,6 @@ process HapIBD {
 
 
 process PhaseIBD {
-   time = "2h"
-   memory = "100GB"
    cpus 1
 
    errorStrategy "retry"
