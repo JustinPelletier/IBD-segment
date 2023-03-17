@@ -22,7 +22,7 @@ process geneticMap {
    """
    #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
    plink --vcf ${genotype} --cm-map ${map} ${chromosome} --make-bed --out ${genotype.getBaseName()}.custom
-   awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim | uniq > ${genotype.getBaseName()}.custom.map
+   awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
 
    """
 }
