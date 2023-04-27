@@ -7,3 +7,4 @@
 
 module load nextflow
 nextflow run /path/to/IBD_pipeline.nf -w /path/to/working/directory
+#nextflow run /path/to/IBD_pipeline.nf -resume -w /path/to/working/directory
