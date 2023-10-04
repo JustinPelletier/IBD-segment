@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import phasedibd as ibd
 import sys
 import pandas as pd
 import os.path
@@ -40,7 +39,9 @@ ibd_segments = pd.read_csv(my_file, sep='\t', lineterminator='\n')
 if method=="HapIBD":
     ibd_segments.columns = ['SAMPLE1','HAP_INDEX1','SAMPLE2','HAP_INDEX2','CHROM','START','END','GEN_LENGTH']
     #create new columns merging the ids in order
-    ibd_segments['id1_id2'] = ibd_segments['SAMPLE1'].astype(str) + ':' + ibd_segments['SAMPLE2'].astype(str)
+    iibd_segments['SAMPLE1'] = ibd_segments['SAMPLE1'].astype(str)
+    ibd_segments['SAMPLE2'] = ibd_segments['SAMPLE2'].astype(str)
+    ibd_segments['id1_id2'] = ibd_segments['SAMPLE1'] + ':' + ibd_segments['SAMPLE2']
     #create the IBD summ per pair of individuals
     pair_len = ibd_segments.groupby('id1_id2',as_index=False).agg({'id1_id2':'first' ,'GEN_LENGTH':'sum'})
     pair_num = ibd_segments['id1_id2'].value_counts()
@@ -50,7 +51,9 @@ if method=="HapIBD":
 if method=="PhaseIBD":
     ibd_segments.columns = ['chromosome','id1','id2','id1_haplotype','id2_haplotype','start','end','start_cm','end_cm','start_bp','end_bp','size_cM','size_bp']
     #create new columns merging the ids in order
-    ibd_segments['id1_id2'] = ibd_segments['id1'].astype(str) + ':' + ibd_segments['id2'].astype(str)
+    ibd_segments['id1'] = ibd_segments['id1'].astype(str)
+    ibd_segments['id2'] = ibd_segments['id2'].astype(str)
+    ibd_segments['id1_id2'] = ibd_segments['id1'] + ':' + ibd_segments['id2']
     #create the IBD summ per pair of individuals
     pair_len = ibd_segments.groupby('id1_id2',as_index=False).agg({'id1_id2':'first' ,'size_cM':'sum'})
     pair_num = ibd_segments['id1_id2'].value_counts()
