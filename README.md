@@ -47,7 +47,7 @@ The ```bin``` folder contains executables for
 - hap-ibd
 - phaseibd 
 
-The ```HapMap``` folder containing the GRCh38 and GRCh37 Recombination maps from the [HapMap project](https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/) in gmap format.
+The ```HapMap``` folder contains the GRCh38 and GRCh37 Recombination maps from the [HapMap project](https://bochet.gcc.biostat.washington.edu/beagle/genetic_maps/) in gmap format.
 
 
 
@@ -59,16 +59,18 @@ RUNNING
     git clone https://github.com/
 
     Modify nextflow.config configuration file.
-        params.workingDir -- path to the working output directory
-        params.virtualenv -- path to the virtual environment where to run phaseibd in python
-        params.genoFile -- path to your VCF file. You can use glob expressions to selecect multiple files.
-        params.phaseibd -- path to phaseibd python custom script (phaseibd_chr.py) file that is this github repository
-        params.hapibd -- path to hap-ibd executable java (.jar) file
-        params.geneticMap -- path to the genetic map of your choice (GRCh36, GRCh37 or GRCh38) available in this repository (grch38 with hapmap with and without chromosome prefix are available in this repository : (NAME OF THE .ZIP FILES)
-        params.gapfile -- path to bed file with intervals to remove from the IBD segments
-        params.phasingStep -- Specify if your data is phased (0) or if you want to phase it (1)
-        params.chromosomePrefix -- Specify if your genotype file (genoFile) has "chr" as chromosome prefix (1) or not (0)
-        params.removeGaps -- Specify if you want the gaps to be removed from the IBD segment (1) or kept (0)
+        workingDir -- path to the working output directory
+        virtualenv -- path to the virtual environment where to run phaseibd in python
+        genoFile -- path to your VCF file. You can use glob expressions to selecect multiple files.
+        phaseibd -- path to phaseibd python custom script (phaseibd_chr.py) file that is this github repository
+        phapibd -- path to hap-ibd executable java (.jar) file
+        geneticMap -- path to the genetic map of your choice (GRCh36, GRCh37 or GRCh38) available in this repository (grch38 with hapmap with and without chromosome prefix are available in this repository : (NAME OF THE .ZIP FILES)
+        gapfile -- path to bed file with intervals to remove from the IBD segments
+        chrom_prefix -- Specify if your genotype file (genoFile) has "chr" as chromosome prefix (1) or not (0)
+        removeGaps -- Specify if you want the gaps to be removed from the IBD segment (1) or kept (0)
+        minimun_size -- Minimum size of the detected segments in CentiMorgan (cM)
+        minimum_markers -- Minimum number of markers per IBD segment
+        assembly -- Genome assembly build ("GRCh38" or "GRCh37")
 
         
 
