@@ -11,9 +11,9 @@ INTRODUCTION
 This pipeline identifies IBD segments in phased genetic data (sequencing or genotyping).
 For phasing, refer to the [Beagle pipeline](https://github.com/CERC-Genomic-Medicine/beagle_phasing/tree/main/phase_with_reference)
 
-Run [hap-ibd](https://github.com/browning-lab/hap-ibd)
+Implements [hap-ibd](https://github.com/browning-lab/hap-ibd)
 
-Run [phaseibd](https://github.com/23andMe/phasedibd) 
+Implements [phaseibd](https://github.com/23andMe/phasedibd) 
 
 
 
