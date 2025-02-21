@@ -9,13 +9,16 @@ INTRODUCTION
 [CERC-Genomic-Medecine](https://github.com/CERC-Genomic-Medicine)
 
 This pipeline identifies IBD segments in phased genetic data (sequencing or genotyping).
+
 For phasing, refer to the [Beagle pipeline](https://github.com/CERC-Genomic-Medicine/beagle_phasing/tree/main/phase_with_reference)
 
-Implements [hap-ibd](https://github.com/browning-lab/hap-ibd)
+**Prerequisites**
+This pipeline requires hap-ibd and phaseibd for IBD segment detection. Before running the pipeline, you must download and install both tools:
+Implement [hap-ibd](https://github.com/browning-lab/hap-ibd)
 
-Implements [phaseibd](https://github.com/23andMe/phasedibd) 
+Implement [phaseibd](https://github.com/23andMe/phasedibd) 
 
-
+Make sure both tools are correctly installed and accessible in your system's path before launching the pipeline.
 
 REQUIREMENTS
 ------------
