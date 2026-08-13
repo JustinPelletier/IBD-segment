@@ -35,15 +35,15 @@ process QC_VCF {
     input:
     tuple val(chromosome),
           path(vcf),
-          path(map),
-          path(gap)
+          path(genetic_map),
+          path(gap_file)
 
     output:
     tuple val(chromosome),
           path("chr${chromosome}.qc.vcf.gz"),
           path("chr${chromosome}.qc.vcf.gz.tbi"),
-          path(map),
-          path(gap),
+          path(genetic_map),
+          path(gap_file),
           emit: vcfs
 
     tuple val(chromosome),
@@ -95,8 +95,8 @@ process QC_VCF {
 
     # Hap-IBD requires every genotype to be phased and non-missing.
     #
-    # Do not exit AWK early because pipefail would interpret the resulting
-    # bcftools SIGPIPE as a failed pipeline.
+    # AWK scans the complete input instead of exiting immediately.
+    # This prevents a SIGPIPE error from bcftools under pipefail.
     if bcftools query \
         -f '[%GT\\n]' \
         chr${chromosome}.qc.vcf.gz |
@@ -123,11 +123,11 @@ process QC_VCF {
 
 
 /*
- * Confirm that the sample IDs and their ordering are identical
- * across all chromosome-specific VCF files.
+ * Confirm that sample IDs and their ordering are identical across
+ * all chromosome-specific VCF files.
  *
- * cohort.samples.txt is subsequently used to include participants
- * without detected IBD edges as isolated clustering vertices.
+ * cohort.samples.txt is also used to include participants without
+ * detected IBD edges as isolated clustering vertices.
  */
 process VALIDATE_SAMPLES {
     tag 'validate sample lists'
@@ -172,80 +172,14 @@ process VALIDATE_SAMPLES {
 
 
 /*
- * Interpolate genetic positions for variants retained after QC.
- *
- * The resulting genetic map contains exactly the markers present
- * in the chromosome-specific QC-filtered VCF.
- */
-process GENETIC_MAP {
-    tag "chr${chromosome}"
-
-    cpus params.resources.map.cpus
-    memory params.resources.map.memory
-    time params.resources.map.time
-
-    errorStrategy 'terminate'
-
-    beforeScript """
-    module load StdEnv/2020
-    module load plink/1.9b_6.21-x86_64
-    """
-
-    publishDir "${params.outdir}/maps",
-        pattern: '*.custom.map',
-        mode: 'copy',
-        overwrite: true
-
-    input:
-    tuple val(chromosome),
-          path(vcf),
-          path(index),
-          path(map),
-          path(gap)
-
-    output:
-    tuple val(chromosome),
-          path(vcf),
-          path(index),
-          path("chr${chromosome}.custom.map"),
-          path(gap)
-
-    script:
-    """
-    set -euo pipefail
-
-    plink \
-        --vcf ${vcf} \
-        --cm-map ${map} ${chromosome} \
-        --double-id \
-        --make-bed \
-        --out chr${chromosome}.custom
-
-    awk '
-        BEGIN {
-            OFS = "\\t"
-        }
-
-        {
-            print \$1, ".", \$3, \$4
-        }
-    ' chr${chromosome}.custom.bim \
-        > chr${chromosome}.custom.map
-
-    if [[ ! -s chr${chromosome}.custom.map ]]
-    then
-        echo "ERROR: the custom genetic map for chromosome ${chromosome} is empty." >&2
-        exit 1
-    fi
-    """
-}
-
-
-/*
  * Detect IBD segments using Hap-IBD.
  *
+ * Hap-IBD directly interpolates genetic positions from the supplied
+ * chromosome-specific genetic map. A marker-matched PLINK map is
+ * therefore not required.
+ *
  * If excluded-region filtering is enabled, complete IBD segments
- * overlapping a listed interval are removed.
+ * overlapping at least one listed interval are removed.
  */
 process HAP_IBD {
     tag "chr${chromosome}"
@@ -276,11 +210,11 @@ process HAP_IBD {
     input:
     tuple val(chromosome),
           path(vcf),
-          path(index),
-          path(map),
-          path(gap)
+          path(vcf_index),
+          path(genetic_map),
+          path(gap_file)
 
-    path hapibd
+    path hapibd_jar
 
     output:
     tuple val(chromosome),
@@ -314,8 +248,10 @@ process HAP_IBD {
               sed 's/^chr//'
           )
 
-          # Extract intervals for the current chromosome and make their
-          # chromosome convention match the VCF/Hap-IBD output.
+          # Select the excluded regions for the current chromosome.
+          #
+          # The chromosome label is rewritten to match the VCF and
+          # Hap-IBD output, allowing either "1" or "chr1" conventions.
           awk \
               -v target="\${vcf_chromosome}" \
               -v normalized="\${normalized_chromosome}" \
@@ -332,7 +268,7 @@ process HAP_IBD {
                       print target, \$2, \$3, \$4
                   }
               }
-              ' ${gap} \
+              ' ${gap_file} \
               > chr${chromosome}.normalized.gaps.bed
 
           if [[ ! -s chr${chromosome}.normalized.gaps.bed ]]
@@ -343,8 +279,8 @@ process HAP_IBD {
                   chr${chromosome}.raw.ibd \
                   chr${chromosome}.filtered.ibd
           else
-              # Hap-IBD uses one-based inclusive coordinates, whereas BED
-              # uses zero-based, half-open coordinates.
+              # Hap-IBD reports one-based inclusive positions.
+              # BED uses zero-based, half-open coordinates.
               awk '
                   BEGIN {
                       OFS = "\\t"
@@ -379,9 +315,9 @@ process HAP_IBD {
 
     java \
         -Xmx${javaGb}g \
-        -jar ${hapibd} \
+        -jar ${hapibd_jar} \
         gt=${vcf} \
-        map=${map} \
+        map=${genetic_map} \
         out=chr${chromosome}.raw \
         min-seed=${params.hapibd.min_seed_cm} \
         min-extend=${params.hapibd.min_extend_cm} \
@@ -499,7 +435,7 @@ process PER_PAIR_GENOMEWIDE {
  * weighted IBD-sharing graph.
  */
 process CLUSTER_GRAPH {
-    tag 'recursive clustering'
+    tag "${method} clustering"
 
     cpus params.resources.clustering.cpus
     memory params.resources.clustering.memory
@@ -570,16 +506,19 @@ workflow {
         error 'Set params.per_pair_script.'
     }
 
-    if (!params.clustering_script) {
-        error 'Set params.clustering_script.'
-    }
-
     if (!params.python_venv) {
         error 'Set params.python_venv.'
     }
 
-    if (params.remove_gaps && !params.gap_file) {
-        error 'Set params.gap_file when remove_gaps=true.'
+    if (
+        (params.Louvain || params.Leiden) &&
+        !params.clustering_script
+    ) {
+        error 'Set params.clustering_script when clustering is enabled.'
+    }
+
+    if (!params.gap_file) {
+        error 'Set params.gap_file.'
     }
 
     if (!(params.chromosomes as List)) {
@@ -623,6 +562,10 @@ workflow {
         error 'params.hapibd.min_mac must be at least one.'
     }
 
+    if (params.hapibd.max_gap_bp < -1) {
+        error 'params.hapibd.max_gap_bp must be at least -1.'
+    }
+
     if (params.summary.segment_threshold_cm < 0) {
         error 'params.summary.segment_threshold_cm must be greater than or equal to zero.'
     }
@@ -634,17 +577,45 @@ workflow {
         error 'Clustering refinement depths must be greater than or equal to zero.'
     }
 
-    if (params.clustering.min_cluster_size < 2) {
+    if (
+        (params.Louvain || params.Leiden) &&
+        params.clustering.min_cluster_size < 2
+    ) {
         error 'params.clustering.min_cluster_size must be at least two.'
     }
 
-    if (params.clustering.min_modularity_gain < 0) {
+    if (
+        (params.Louvain || params.Leiden) &&
+        params.clustering.min_modularity_gain < 0
+    ) {
         error 'params.clustering.min_modularity_gain must be greater than or equal to zero.'
     }
 
-    if (params.clustering.leiden_resolution <= 0) {
+    if (
+        params.Leiden &&
+        params.clustering.leiden_resolution <= 0
+    ) {
         error 'params.clustering.leiden_resolution must be greater than zero.'
     }
+
+
+    /*
+     * Resolve fixed program and asset files.
+     */
+    hapibdJar = file(
+        params.hapibd_jar,
+        checkIfExists: true
+    )
+
+    summaryScript = file(
+        params.per_pair_script,
+        checkIfExists: true
+    )
+
+    excludedRegions = file(
+        params.gap_file,
+        checkIfExists: true
+    )
 
 
     /*
@@ -671,16 +642,11 @@ workflow {
                 checkIfExists: true
             )
 
-            def gapFile = file(
-                params.gap_file,
-                checkIfExists: true
-            )
-
             tuple(
                 chromosome,
                 vcf,
                 geneticMap,
-                gapFile
+                excludedRegions
             )
         }
 
@@ -702,37 +668,17 @@ workflow {
 
 
     /*
-     * Generate marker-matched maps when requested.
-     */
-    if (params.generate_custom_maps) {
-        mapsForHapIBD = GENETIC_MAP(
-            qc.vcfs
-        )
-    } else {
-        mapsForHapIBD = qc.vcfs
-    }
-
-
-    /*
-     * Detect IBD segments.
+     * Detect IBD segments using the original genetic maps.
      */
     hapIBD = HAP_IBD(
-        mapsForHapIBD,
-        file(
-            params.hapibd_jar,
-            checkIfExists: true
-        )
+        qc.vcfs,
+        hapibdJar
     )
 
 
     /*
      * Generate chromosome-specific and genome-wide pair summaries.
      */
-    summaryScript = file(
-        params.per_pair_script,
-        checkIfExists: true
-    )
-
     PER_PAIR_CHROMOSOME(
         hapIBD.segments,
         summaryScript
@@ -771,19 +717,20 @@ workflow {
     /*
      * Run each requested clustering algorithm.
      *
-     * genomewideSummary and validatedSamples are value channels because
-     * their process inputs were created with collect(). They can therefore
-     * be reused by both clustering jobs without additional operators.
+     * genomewideSummary and validatedSamples are reusable value
+     * channels because their upstream inputs were created with collect().
      */
     if (clusteringMethods) {
+        clusteringScript = file(
+            params.clustering_script,
+            checkIfExists: true
+        )
+
         CLUSTER_GRAPH(
             Channel.fromList(clusteringMethods),
             genomewideSummary,
             validatedSamples,
-            file(
-                params.clustering_script,
-                checkIfExists: true
-            )
+            clusteringScript
         )
     }
 }
