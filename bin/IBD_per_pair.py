@@ -558,7 +558,7 @@ def main() -> None:
 
         print(
             f"Output: {args.output}",
-            file=sys.stderr.stderr,
+            file=sys.stderr,
         )
 
     finally:
