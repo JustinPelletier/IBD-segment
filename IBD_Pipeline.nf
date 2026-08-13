@@ -2,10 +2,22 @@
  * Hap-IBD segment-detection pipeline
  *
  * Author: Justin Pelletier
- * Version: 2.0
+ * Version: 2.1
  */
 
 nextflow.enable.dsl = 2
+
+/*
+ * By default, assume VCF chromosome identifiers do not contain "chr".
+ *
+ * Override with:
+ * --chr_in_chrom_field true
+ *
+ * when VCF chromosome identifiers are chr1, chr2, etc.
+ */
+if (!params.containsKey('chr_in_chrom_field')) {
+    params.chr_in_chrom_field = false
+}
 
 
 /*
@@ -90,6 +102,37 @@ process QC_VCF {
     if [[ \${number_of_variants} -eq 0 ]]
     then
         echo "ERROR: no variants remained after QC on chromosome ${chromosome}." >&2
+        exit 1
+    fi
+
+    # Hap-IBD requires identical chromosome identifiers in the VCF
+    # and the first column of the PLINK genetic map.
+    vcf_chromosome=\$(
+        bcftools index -s chr${chromosome}.qc.vcf.gz |
+        awk 'NR == 1 { print \$1 }'
+    )
+
+    map_chromosome=\$(
+        awk '
+            NF > 0 && \$1 !~ /^#/ {
+                print \$1
+                exit
+            }
+        ' ${genetic_map}
+    )
+
+    if [[ -z "\${vcf_chromosome}" || -z "\${map_chromosome}" ]]
+    then
+        echo "ERROR: unable to read the chromosome identifier from the VCF or genetic map." >&2
+        exit 1
+    fi
+
+    if [[ "\${vcf_chromosome}" != "\${map_chromosome}" ]]
+    then
+        echo "ERROR: chromosome identifiers do not match for chromosome ${chromosome}." >&2
+        echo "VCF chromosome: \${vcf_chromosome}" >&2
+        echo "Map chromosome: \${map_chromosome}" >&2
+        echo "Set params.chr_in_chrom_field to match the VCF convention." >&2
         exit 1
     fi
 
@@ -494,10 +537,6 @@ workflow {
         error 'Set params.input_pattern.'
     }
 
-    if (!params.genetic_map_pattern) {
-        error 'Set params.genetic_map_pattern.'
-    }
-
     if (!params.hapibd_jar) {
         error 'Set params.hapibd_jar.'
     }
@@ -523,6 +562,10 @@ workflow {
 
     if (!(params.chromosomes as List)) {
         error 'params.chromosomes must contain at least one chromosome.'
+    }
+
+    if (!(params.chr_in_chrom_field instanceof Boolean)) {
+        error 'params.chr_in_chrom_field must be true or false.'
     }
 
     if (
@@ -619,6 +662,31 @@ workflow {
 
 
     /*
+     * Select the bundled GRCh38 PLINK maps without modifying or
+     * renaming them.
+     *
+     * false:
+     *   VCF chromosomes are 1, 2, ..., 22.
+     *   Maps are:
+     *   assets/no_chr_in_chrom_field/plink.chrN.GRCh38.map
+     *
+     * true:
+     *   VCF chromosomes are chr1, chr2, ..., chr22.
+     *   Maps are:
+     *   assets/chr_in_chrom_field/plink.chrchrN.GRCh38.map
+     */
+    def chrInChromField = params.chr_in_chrom_field
+
+    def geneticMapDirectory = chrInChromField \
+        ? file("${projectDir}/assets/chr_in_chrom_field")
+        : file("${projectDir}/assets/no_chr_in_chrom_field")
+
+    def geneticMapPrefix = chrInChromField \
+        ? 'plink.chrchr'
+        : 'plink.chr'
+
+
+    /*
      * Construct one input tuple for each chromosome.
      */
     inputs = Channel
@@ -635,10 +703,7 @@ workflow {
             )
 
             def geneticMap = file(
-                params.genetic_map_pattern.replace(
-                    '{chr}',
-                    chromosomeString
-                ),
+                "${geneticMapDirectory}/${geneticMapPrefix}${chromosomeString}.GRCh38.map",
                 checkIfExists: true
             )
 
@@ -668,7 +733,7 @@ workflow {
 
 
     /*
-     * Detect IBD segments using the original genetic maps.
+     * Detect IBD segments using the official GRCh38 PLINK maps.
      */
     hapIBD = HAP_IBD(
         qc.vcfs,
