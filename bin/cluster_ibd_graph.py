@@ -1,0 +1,1022 @@
+#!/usr/bin/env python3
+
+"""
+Recursively cluster a weighted IBD-sharing graph using Louvain or Leiden.
+
+The graph is constructed from:
+
+1. A genome-wide pair-level IBD summary containing graph edges.
+2. A complete sample list containing all graph vertices.
+
+Every sample is added as a vertex, including participants with no detected
+IBD-sharing edges. Such participants remain in the graph as isolated nodes.
+
+Recursive clustering
+--------------------
+Level 0 assigns the complete cohort to one initial community.
+
+At level 1, the selected clustering algorithm is applied to the complete graph.
+
+At each subsequent level, every sufficiently large community from the previous
+level is independently submitted to the same clustering algorithm. Communities
+smaller than --min-cluster-size remain in the output but are not refined again.
+
+Automatic level selection
+-------------------------
+When --auto-select=true:
+
+1. Global weighted modularity is calculated at every refinement level.
+2. Refinement stops after a level whose modularity gain is smaller than
+   --min-modularity-gain.
+3. The computed level with the highest global weighted modularity is selected.
+
+When --auto-select=false, the deepest successfully computed level is selected.
+"""
+
+import argparse
+import csv
+import gzip
+import inspect
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import IO, Iterable, Optional
+
+import igraph as ig
+
+
+def parse_boolean(value: str) -> bool:
+    """Convert a command-line string to a Boolean value."""
+
+    normalized_value = value.strip().lower()
+
+    if normalized_value == "true":
+        return True
+
+    if normalized_value == "false":
+        return False
+
+    raise argparse.ArgumentTypeError(
+        "Expected either 'true' or 'false'."
+    )
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Recursively cluster a weighted IBD-sharing graph using "
+            "Louvain or Leiden."
+        )
+    )
+
+    parser.add_argument(
+        "--edges",
+        required=True,
+        type=Path,
+        help=(
+            "Genome-wide pair-level IBD summary in .tsv or .tsv.gz format."
+        ),
+    )
+
+    parser.add_argument(
+        "--samples",
+        required=True,
+        type=Path,
+        help=(
+            "Complete sample list with one sample ID per line."
+        ),
+    )
+
+    parser.add_argument(
+        "--method",
+        required=True,
+        choices=("louvain", "leiden"),
+        help="Community-detection algorithm.",
+    )
+
+    parser.add_argument(
+        "--max-levels",
+        required=True,
+        type=int,
+        help=(
+            "Maximum recursive refinement depth. Level 1 clusters the "
+            "complete graph; subsequent levels recluster communities."
+        ),
+    )
+
+    parser.add_argument(
+        "--weight-column",
+        required=True,
+        help=(
+            "Column from the edge file to use as the graph edge weight."
+        ),
+    )
+
+    parser.add_argument(
+        "--min-cluster-size",
+        required=True,
+        type=int,
+        help=(
+            "Communities smaller than this value remain in the results "
+            "but are not submitted to another refinement level."
+        ),
+    )
+
+    parser.add_argument(
+        "--min-modularity-gain",
+        required=True,
+        type=float,
+        help=(
+            "Minimum global weighted modularity gain required to continue "
+            "recursive refinement when automatic selection is enabled."
+        ),
+    )
+
+    parser.add_argument(
+        "--resolution",
+        required=True,
+        type=float,
+        help=(
+            "Resolution parameter used by Leiden. The standard Louvain "
+            "implementation in python-igraph does not use this parameter."
+        ),
+    )
+
+    parser.add_argument(
+        "--seed",
+        required=True,
+        type=int,
+        help="Random seed used for reproducible clustering.",
+    )
+
+    parser.add_argument(
+        "--auto-select",
+        required=True,
+        type=parse_boolean,
+        help=(
+            "If true, stop after insufficient modularity improvement and "
+            "select the computed level with the highest modularity."
+        ),
+    )
+
+    parser.add_argument(
+        "--output-prefix",
+        required=True,
+        help="Prefix used for all output files.",
+    )
+
+    return parser.parse_args()
+
+
+def open_text_file(
+    path: Path,
+    mode: str = "rt",
+) -> IO[str]:
+    """Open a plain-text or gzip-compressed file."""
+
+    if str(path).endswith(".gz"):
+        return gzip.open(
+            path,
+            mode=mode,
+            encoding="utf-8",
+            newline="",
+        )
+
+    return path.open(
+        mode=mode,
+        encoding="utf-8",
+        newline="",
+    )
+
+
+def validate_arguments(args: argparse.Namespace) -> None:
+    """Validate file paths and clustering parameters."""
+
+    if not args.edges.is_file():
+        raise SystemExit(
+            f"ERROR: edge file does not exist: {args.edges}"
+        )
+
+    if not args.samples.is_file():
+        raise SystemExit(
+            f"ERROR: sample file does not exist: {args.samples}"
+        )
+
+    if args.max_levels < 0:
+        raise SystemExit(
+            "ERROR: --max-levels must be greater than or equal to zero."
+        )
+
+    if args.min_cluster_size < 2:
+        raise SystemExit(
+            "ERROR: --min-cluster-size must be greater than or equal to two."
+        )
+
+    if args.min_modularity_gain < 0:
+        raise SystemExit(
+            "ERROR: --min-modularity-gain must be greater than or equal to zero."
+        )
+
+    if args.resolution <= 0:
+        raise SystemExit(
+            "ERROR: --resolution must be greater than zero."
+        )
+
+
+def read_samples(sample_path: Path) -> list[str]:
+    """
+    Read the complete cohort sample list.
+
+    Duplicate sample IDs are not allowed because vertex names must be unique.
+    """
+
+    samples: list[str] = []
+    observed_samples: set[str] = set()
+
+    with open_text_file(sample_path) as sample_handle:
+        for line_number, line in enumerate(
+            sample_handle,
+            start=1,
+        ):
+            sample_id = line.strip()
+
+            if not sample_id:
+                continue
+
+            if sample_id in observed_samples:
+                raise SystemExit(
+                    "ERROR: duplicate sample ID in the sample list.\n"
+                    f"File: {sample_path}\n"
+                    f"Line: {line_number}\n"
+                    f"Sample: {sample_id}"
+                )
+
+            observed_samples.add(sample_id)
+            samples.append(sample_id)
+
+    if not samples:
+        raise SystemExit(
+            f"ERROR: the sample file is empty: {sample_path}"
+        )
+
+    return samples
+
+
+def read_graph(
+    edge_path: Path,
+    samples: list[str],
+    weight_column: str,
+) -> ig.Graph:
+    """
+    Construct an undirected weighted graph.
+
+    Every sample is added as a vertex, even when the sample has no edge.
+    The pair-summary file is expected to contain one row per sample pair.
+    """
+
+    sample_to_index = {
+        sample_id: index
+        for index, sample_id in enumerate(samples)
+    }
+
+    graph_edges: list[tuple[int, int]] = []
+    graph_weights: list[float] = []
+
+    with open_text_file(edge_path) as edge_handle:
+        reader = csv.DictReader(
+            edge_handle,
+            delimiter="\t",
+        )
+
+        required_columns = {
+            "ID1",
+            "ID2",
+            weight_column,
+        }
+
+        observed_columns = set(
+            reader.fieldnames or []
+        )
+
+        missing_columns = (
+            required_columns - observed_columns
+        )
+
+        if missing_columns:
+            raise SystemExit(
+                "ERROR: the edge file is missing required columns: "
+                + ", ".join(sorted(missing_columns))
+            )
+
+        for line_number, row in enumerate(
+            reader,
+            start=2,
+        ):
+            sample1 = row["ID1"]
+            sample2 = row["ID2"]
+
+            if sample1 not in sample_to_index:
+                raise SystemExit(
+                    "ERROR: an edge contains a sample absent from "
+                    "the complete sample list.\n"
+                    f"File: {edge_path}\n"
+                    f"Line: {line_number}\n"
+                    f"Sample: {sample1}"
+                )
+
+            if sample2 not in sample_to_index:
+                raise SystemExit(
+                    "ERROR: an edge contains a sample absent from "
+                    "the complete sample list.\n"
+                    f"File: {edge_path}\n"
+                    f"Line: {line_number}\n"
+                    f"Sample: {sample2}"
+                )
+
+            if sample1 == sample2:
+                raise SystemExit(
+                    "ERROR: a self-loop was found in the edge file.\n"
+                    f"File: {edge_path}\n"
+                    f"Line: {line_number}\n"
+                    f"Sample: {sample1}"
+                )
+
+            try:
+                edge_weight = float(
+                    row[weight_column]
+                )
+            except ValueError as error:
+                raise SystemExit(
+                    "ERROR: invalid edge weight.\n"
+                    f"File: {edge_path}\n"
+                    f"Line: {line_number}\n"
+                    f"Column: {weight_column}\n"
+                    f"Value: {row[weight_column]!r}"
+                ) from error
+
+            if (
+                not math.isfinite(edge_weight)
+                or edge_weight < 0
+            ):
+                raise SystemExit(
+                    "ERROR: edge weights must be finite and non-negative.\n"
+                    f"File: {edge_path}\n"
+                    f"Line: {line_number}\n"
+                    f"Value: {edge_weight}"
+                )
+
+            # A zero-weight pair is equivalent to no graph edge.
+            if edge_weight == 0:
+                continue
+
+            graph_edges.append(
+                (
+                    sample_to_index[sample1],
+                    sample_to_index[sample2],
+                )
+            )
+
+            graph_weights.append(
+                edge_weight
+            )
+
+    graph = ig.Graph(
+        n=len(samples),
+        edges=graph_edges,
+        directed=False,
+    )
+
+    graph.vs["name"] = samples
+    graph.es["weight"] = graph_weights
+
+    if graph.ecount() == 0:
+        raise SystemExit(
+            "ERROR: no positive-weight IBD-sharing edges were found."
+        )
+
+    if not graph.is_simple():
+        raise SystemExit(
+            "ERROR: the pair-summary file contains duplicate sample pairs "
+            "or self-loops. It must contain one row per unique sample pair."
+        )
+
+    return graph
+
+
+def run_louvain(
+    graph: ig.Graph,
+) -> list[int]:
+    """Run weighted Louvain clustering."""
+
+    clustering = graph.community_multilevel(
+        weights="weight"
+    )
+
+    return clustering.membership
+
+
+def run_leiden(
+    graph: ig.Graph,
+    resolution: float,
+) -> list[int]:
+    """
+    Run weighted Leiden clustering.
+
+    The resolution argument name changed between python-igraph releases.
+    Both current and older supported APIs are handled here.
+    """
+
+    leiden_arguments = {
+        "objective_function": "modularity",
+        "weights": "weight",
+        "n_iterations": -1,
+    }
+
+    try:
+        signature = inspect.signature(
+            graph.community_leiden
+        )
+
+        if "resolution" in signature.parameters:
+            leiden_arguments["resolution"] = resolution
+        else:
+            leiden_arguments["resolution_parameter"] = resolution
+
+        clustering = graph.community_leiden(
+            **leiden_arguments
+        )
+
+    except (TypeError, ValueError):
+        # Some compiled igraph methods do not expose a complete signature.
+        try:
+            clustering = graph.community_leiden(
+                resolution=resolution,
+                **leiden_arguments,
+            )
+        except TypeError:
+            clustering = graph.community_leiden(
+                resolution_parameter=resolution,
+                **leiden_arguments,
+            )
+
+    return clustering.membership
+
+
+def partition_graph(
+    graph: ig.Graph,
+    method: str,
+    resolution: float,
+) -> list[int]:
+    """Apply the requested community-detection algorithm."""
+
+    if graph.vcount() == 0:
+        return []
+
+    if graph.ecount() == 0:
+        return [0] * graph.vcount()
+
+    if method == "louvain":
+        return run_louvain(
+            graph
+        )
+
+    return run_leiden(
+        graph,
+        resolution,
+    )
+
+
+def calculate_global_modularity(
+    graph: ig.Graph,
+    labels: list[str],
+) -> float:
+    """Calculate weighted modularity for a complete graph partition."""
+
+    label_to_integer = {
+        label: index
+        for index, label in enumerate(
+            dict.fromkeys(labels)
+        )
+    }
+
+    numeric_membership = [
+        label_to_integer[label]
+        for label in labels
+    ]
+
+    return graph.modularity(
+        membership=numeric_membership,
+        weights="weight",
+    )
+
+
+def group_vertices_by_community(
+    membership: list[str],
+) -> dict[str, list[int]]:
+    """Group graph vertex indices according to community membership."""
+
+    grouped_vertices: dict[str, list[int]] = defaultdict(list)
+
+    for vertex_index, community in enumerate(
+        membership
+    ):
+        grouped_vertices[community].append(
+            vertex_index
+        )
+
+    return dict(grouped_vertices)
+
+
+def create_stable_local_labels(
+    subgraph: ig.Graph,
+    local_membership: list[int],
+) -> dict[int, int]:
+    """
+    Create deterministic local cluster labels.
+
+    Communities are ordered by their lexicographically smallest sample ID.
+    This avoids relying on arbitrary internal community numbers.
+    """
+
+    local_communities: dict[int, list[str]] = defaultdict(list)
+
+    for vertex_index, community in enumerate(
+        local_membership
+    ):
+        local_communities[community].append(
+            subgraph.vs[vertex_index]["name"]
+        )
+
+    ordered_communities = sorted(
+        local_communities,
+        key=lambda community: min(
+            local_communities[community]
+        ),
+    )
+
+    return {
+        community: index + 1
+        for index, community in enumerate(
+            ordered_communities
+        )
+    }
+
+
+def refine_membership(
+    graph: ig.Graph,
+    previous_membership: list[str],
+    method: str,
+    resolution: float,
+    min_cluster_size: int,
+) -> tuple[list[str], int]:
+    """
+    Recursively cluster communities from the previous refinement level.
+
+    Returns
+    -------
+    new_membership
+        Hierarchical community labels for the new level.
+
+    communities_split
+        Number of parent communities divided into at least two communities.
+    """
+
+    new_membership = previous_membership.copy()
+    communities_split = 0
+
+    grouped_vertices = group_vertices_by_community(
+        previous_membership
+    )
+
+    graph_sample_to_index = {
+        sample_id: vertex_index
+        for vertex_index, sample_id in enumerate(
+            graph.vs["name"]
+        )
+    }
+
+    for parent_label, vertex_indices in grouped_vertices.items():
+        # Small communities remain in the output but are not refined again.
+        if len(vertex_indices) < min_cluster_size:
+            continue
+
+        subgraph = graph.induced_subgraph(
+            vertex_indices
+        )
+
+        if subgraph.ecount() == 0:
+            continue
+
+        local_membership = partition_graph(
+            graph=subgraph,
+            method=method,
+            resolution=resolution,
+        )
+
+        observed_local_communities = set(
+            local_membership
+        )
+
+        if len(observed_local_communities) < 2:
+            continue
+
+        stable_labels = create_stable_local_labels(
+            subgraph,
+            local_membership,
+        )
+
+        for local_vertex_index, local_community in enumerate(
+            local_membership
+        ):
+            sample_id = subgraph.vs[
+                local_vertex_index
+            ]["name"]
+
+            original_vertex_index = graph_sample_to_index[
+                sample_id
+            ]
+
+            new_membership[original_vertex_index] = (
+                f"{parent_label}."
+                f"{stable_labels[local_community]}"
+            )
+
+        communities_split += 1
+
+    return new_membership, communities_split
+
+
+def choose_selected_level(
+    diagnostics: list[dict],
+    auto_select: bool,
+) -> int:
+    """Choose the final clustering refinement level."""
+
+    if not auto_select:
+        return diagnostics[-1]["level"]
+
+    # max() returns the first occurrence when modularity values are tied,
+    # thereby favoring the simpler, shallower partition.
+    selected_diagnostic = max(
+        diagnostics,
+        key=lambda row: row["modularity"],
+    )
+
+    return selected_diagnostic["level"]
+
+
+def write_tsv(
+    output_path: Path,
+    header: list[str],
+    rows: Iterable[Iterable],
+    compressed: bool = False,
+) -> None:
+    """Write a tab-separated output file."""
+
+    if compressed:
+        output_handle = gzip.open(
+            output_path,
+            mode="wt",
+            encoding="utf-8",
+            newline="",
+        )
+    else:
+        output_handle = output_path.open(
+            mode="wt",
+            encoding="utf-8",
+            newline="",
+        )
+
+    with output_handle:
+        writer = csv.writer(
+            output_handle,
+            delimiter="\t",
+            lineterminator="\n",
+        )
+
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def write_outputs(
+    graph: ig.Graph,
+    method: str,
+    output_prefix: str,
+    memberships: dict[int, list[str]],
+    diagnostics: list[dict],
+    selected_level: int,
+    min_cluster_size: int,
+) -> None:
+    """Write clustering memberships and diagnostic outputs."""
+
+    sample_ids = graph.vs["name"]
+    levels = sorted(memberships)
+
+    membership_path = Path(
+        f"{output_prefix}.membership.tsv.gz"
+    )
+
+    selected_membership_path = Path(
+        f"{output_prefix}.selected_membership.tsv.gz"
+    )
+
+    diagnostics_path = Path(
+        f"{output_prefix}.diagnostics.tsv"
+    )
+
+    cluster_sizes_path = Path(
+        f"{output_prefix}.cluster_sizes.tsv"
+    )
+
+    membership_header = [
+        "ID",
+        *[
+            f"level_{level}"
+            for level in levels
+        ],
+    ]
+
+    membership_rows = (
+        [
+            sample_id,
+            *[
+                memberships[level][sample_index]
+                for level in levels
+            ],
+        ]
+        for sample_index, sample_id in enumerate(
+            sample_ids
+        )
+    )
+
+    write_tsv(
+        output_path=membership_path,
+        header=membership_header,
+        rows=membership_rows,
+        compressed=True,
+    )
+
+    selected_rows = (
+        (
+            sample_id,
+            memberships[selected_level][sample_index],
+        )
+        for sample_index, sample_id in enumerate(
+            sample_ids
+        )
+    )
+
+    write_tsv(
+        output_path=selected_membership_path,
+        header=[
+            "ID",
+            "cluster",
+        ],
+        rows=selected_rows,
+        compressed=True,
+    )
+
+    diagnostic_header = [
+        "method",
+        "level",
+        "number_of_clusters",
+        "modularity",
+        "modularity_gain",
+        "communities_split",
+        "selected",
+        "stopping_reason",
+    ]
+
+    diagnostic_rows = (
+        (
+            method,
+            row["level"],
+            row["number_of_clusters"],
+            format(row["modularity"], ".10g"),
+            (
+                ""
+                if row["modularity_gain"] is None
+                else format(
+                    row["modularity_gain"],
+                    ".10g",
+                )
+            ),
+            row["communities_split"],
+            row["level"] == selected_level,
+            row["stopping_reason"],
+        )
+        for row in diagnostics
+    )
+
+    write_tsv(
+        output_path=diagnostics_path,
+        header=diagnostic_header,
+        rows=diagnostic_rows,
+    )
+
+    cluster_size_rows = []
+
+    for level in levels:
+        cluster_counts = Counter(
+            memberships[level]
+        )
+
+        for cluster, cluster_size in sorted(
+            cluster_counts.items()
+        ):
+            cluster_size_rows.append(
+                (
+                    level,
+                    cluster,
+                    cluster_size,
+                    cluster_size >= min_cluster_size,
+                    level == selected_level,
+                )
+            )
+
+    write_tsv(
+        output_path=cluster_sizes_path,
+        header=[
+            "level",
+            "cluster",
+            "size",
+            "eligible_for_further_refinement",
+            "selected_level",
+        ],
+        rows=cluster_size_rows,
+    )
+
+
+def main() -> None:
+    """Run recursive IBD graph clustering."""
+
+    args = parse_arguments()
+    validate_arguments(args)
+
+    random_number_generator = random.Random(
+        args.seed
+    )
+
+    ig.set_random_number_generator(
+        random_number_generator
+    )
+
+    print(
+        f"Reading complete sample list: {args.samples}",
+        file=sys.stderr,
+    )
+
+    samples = read_samples(
+        args.samples
+    )
+
+    print(
+        f"Reading weighted IBD graph: {args.edges}",
+        file=sys.stderr,
+    )
+
+    graph = read_graph(
+        edge_path=args.edges,
+        samples=samples,
+        weight_column=args.weight_column,
+    )
+
+    isolated_vertex_count = sum(
+        degree == 0
+        for degree in graph.degree()
+    )
+
+    print(
+        (
+            f"Graph contains {graph.vcount():,} vertices, "
+            f"{graph.ecount():,} edges and "
+            f"{isolated_vertex_count:,} isolated vertices."
+        ),
+        file=sys.stderr,
+    )
+
+    memberships: dict[int, list[str]] = {
+        0: ["C1"] * graph.vcount()
+    }
+
+    initial_modularity = calculate_global_modularity(
+        graph,
+        memberships[0],
+    )
+
+    diagnostics = [
+        {
+            "level": 0,
+            "number_of_clusters": 1,
+            "modularity": initial_modularity,
+            "modularity_gain": None,
+            "communities_split": 0,
+            "stopping_reason": "",
+        }
+    ]
+
+    stop_reason: Optional[str] = None
+
+    for level in range(
+        1,
+        args.max_levels + 1,
+    ):
+        previous_membership = memberships[
+            level - 1
+        ]
+
+        new_membership, communities_split = refine_membership(
+            graph=graph,
+            previous_membership=previous_membership,
+            method=args.method,
+            resolution=args.resolution,
+            min_cluster_size=args.min_cluster_size,
+        )
+
+        if communities_split == 0:
+            stop_reason = "no_communities_split"
+            diagnostics[-1]["stopping_reason"] = stop_reason
+            break
+
+        memberships[level] = new_membership
+
+        modularity = calculate_global_modularity(
+            graph,
+            new_membership,
+        )
+
+        modularity_gain = (
+            modularity
+            - diagnostics[-1]["modularity"]
+        )
+
+        diagnostics.append(
+            {
+                "level": level,
+                "number_of_clusters": len(
+                    set(new_membership)
+                ),
+                "modularity": modularity,
+                "modularity_gain": modularity_gain,
+                "communities_split": communities_split,
+                "stopping_reason": "",
+            }
+        )
+
+        print(
+            (
+                f"{args.method.capitalize()} level {level}: "
+                f"{len(set(new_membership)):,} clusters; "
+                f"modularity={modularity:.6f}; "
+                f"gain={modularity_gain:.6f}."
+            ),
+            file=sys.stderr,
+        )
+
+        if (
+            args.auto_select
+            and modularity_gain < args.min_modularity_gain
+        ):
+            stop_reason = "modularity_gain_below_threshold"
+            diagnostics[-1]["stopping_reason"] = stop_reason
+            break
+
+    else:
+        stop_reason = "maximum_refinement_depth_reached"
+        diagnostics[-1]["stopping_reason"] = stop_reason
+
+    selected_level = choose_selected_level(
+        diagnostics=diagnostics,
+        auto_select=args.auto_select,
+    )
+
+    write_outputs(
+        graph=graph,
+        method=args.method,
+        output_prefix=args.output_prefix,
+        memberships=memberships,
+        diagnostics=diagnostics,
+        selected_level=selected_level,
+        min_cluster_size=args.min_cluster_size,
+    )
+
+    print(
+        (
+            f"Selected {args.method.capitalize()} refinement "
+            f"level: {selected_level}"
+        ),
+        file=sys.stderr,
+    )
+
+    print(
+        f"Stopping reason: {stop_reason}",
+        file=sys.stderr,
+    )
+
+
+if __name__ == "__main__":
+    main()
