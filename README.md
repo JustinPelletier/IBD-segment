@@ -32,14 +32,19 @@ IBD-segment/
 ├── nextflow.config
 ├── Run_IBD.sh
 ├── assets/
-│   └── empty.gap.bed
+└── plink.GRCh38.map/
+    ├── chr_in_chrom_field/
+    │   ├── plink.chr1.GRCh38.map
+    │   ├── ...
+    │   └── plink.chr22.GRCh38.map
+    └── no_chr_in_chrom_field/
+        ├── plink.chr1.GRCh38.map
+        ├── ...
+        └── plink.chr22.GRCh38.map
 └── bin/
     ├── hap-ibd.jar
     ├── IBD_per_pair.py
     ├── cluster_ibd_graph.py
-    └── HapMap/
-        ├── GRCh37/
-        └── GRCh38/
 ```
 
 ## Input requirements
