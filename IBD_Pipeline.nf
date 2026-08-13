@@ -442,7 +442,7 @@ process PER_PAIR_GENOMEWIDE {
  * weighted IBD-sharing graph.
  */
 process CLUSTER_GRAPH {
-    tag "${method} recursive clustering"
+    tag 'recursive clustering'
 
     cpus params.resources.clustering.cpus
     memory params.resources.clustering.memory
@@ -452,7 +452,7 @@ process CLUSTER_GRAPH {
     source ${params.python_venv}/bin/activate
     """
 
-    publishDir "${params.outdir}/clustering/${method}",
+    publishDir "${params.outdir}/clustering",
         mode: 'copy',
         overwrite: true
 
