@@ -7,18 +7,6 @@
 
 nextflow.enable.dsl = 2
 
-/*
- * By default, assume VCF chromosome identifiers do not contain "chr".
- *
- * Override with:
- * --chr_in_chrom_field true
- *
- * when VCF chromosome identifiers are chr1, chr2, etc.
- */
-if (!params.containsKey('chr_in_chrom_field')) {
-    params.chr_in_chrom_field = false
-}
-
 
 /*
  * Filter variants according to MAF and variant missingness.
