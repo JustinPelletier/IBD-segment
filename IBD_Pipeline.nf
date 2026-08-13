@@ -1,228 +1,611 @@
 /*
-* AUTHOR: Justin Pelletier, MSc <justin.pelletier2@mcgill.ca>
-* VERSION: 1.0
-* YEAR: 2022
-*/
+ * Hap-IBD segment-detection pipeline
+ *
+ * Author: Justin Pelletier
+ * Version: 2.0
+ */
 
-process geneticMap {
-   time = "1h"
-   memory = "5GB"
-   cpus 1
-
-   errorStrategy "finish"
-   beforeScript "module load plink/1.9b_6.21-x86_64"
+nextflow.enable.dsl = 2
 
 
-   input:
-   tuple val(chromosome), path(genotype), path(map),path(gap), val(removegap)
+/*
+ * Filter variants according to MAF and variant missingness.
+ * The process also confirms that all retained genotypes are phased
+ * and contain no missing alleles, as required by Hap-IBD.
+ */
+process QC_VCF {
+    tag "chr${chromosome}"
 
-   output:
-   tuple val(chromosome), path(genotype), path("*.custom.map"), path(gap), val(removegap)
+    cpus params.resources.qc.cpus
+    memory params.resources.qc.memory
+    time params.resources.qc.time
 
-   """
-   #with a genetic map need to be the exact same variants than the input vcf file (interpolation)
-   plink --vcf ${genotype} --cm-map ${map} ${chromosome} --double-id --make-bed --out ${genotype.getBaseName()}.custom
-   awk '{print \$1" . "\$3" "\$4}' ${genotype.getBaseName()}.custom.bim > ${genotype.getBaseName()}.custom.map
+    errorStrategy 'terminate'
 
-   """
+    beforeScript """
+    module load bcftools
+    """
+
+    publishDir "${params.outdir}/qc",
+        pattern: '*.qc.stats.txt',
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(chromosome), path(vcf), path(map), path(gap)
+
+    output:
+    tuple val(chromosome),
+          path("chr${chromosome}.qc.vcf.gz"),
+          path("chr${chromosome}.qc.vcf.gz.tbi"),
+          path(map),
+          path(gap),
+          emit: vcfs
+
+    tuple val(chromosome),
+          path("chr${chromosome}.samples.txt"),
+          emit: samples
+
+    path "chr${chromosome}.qc.stats.txt",
+          emit: stats
+
+    script:
+    """
+    set -o pipefail
+
+    bcftools +fill-tags ${vcf} -Ou -- -t MAF,F_MISSING | \
+        bcftools view \
+            -i 'MAF>=${params.qc.min_maf} && F_MISSING<=${params.qc.max_variant_missingness}' \
+            -Oz \
+            -o chr${chromosome}.qc.vcf.gz
+
+    tabix -f -p vcf chr${chromosome}.qc.vcf.gz
+
+    bcftools query \
+        -l chr${chromosome}.qc.vcf.gz \
+        > chr${chromosome}.samples.txt
+
+    if [[ ! -s chr${chromosome}.samples.txt ]]; then
+        echo "ERROR: no samples were found in the chromosome ${chromosome} VCF." >&2
+        exit 1
+    fi
+
+    if [[ \$(bcftools index -n chr${chromosome}.qc.vcf.gz) -eq 0 ]]; then
+        echo "ERROR: no variants remained after QC on chromosome ${chromosome}." >&2
+        exit 1
+    fi
+
+    # Hap-IBD requires every genotype to be phased and non-missing.
+    if bcftools query -f '[%GT\\n]' chr${chromosome}.qc.vcf.gz | \
+       awk '
+           index(\$0, "/") || index(\$0, ".") {
+               invalid = 1
+               exit
+           }
+           END {
+               exit !invalid
+           }
+       '
+    then
+        echo "ERROR: chr${chromosome}.qc.vcf.gz contains an unphased or missing genotype." >&2
+        echo "Hap-IBD requires all genotypes to be phased and non-missing." >&2
+        exit 1
+    fi
+
+    bcftools stats \
+        chr${chromosome}.qc.vcf.gz \
+        > chr${chromosome}.qc.stats.txt
+    """
 }
 
 
+/*
+ * Confirm that the sample IDs and their ordering are identical across
+ * all chromosome-specific VCF files.
+ *
+ * The resulting cohort.samples.txt file is also used to include isolated
+ * participants in the clustering graph.
+ */
+process VALIDATE_SAMPLES {
+    tag 'validate sample lists'
 
+    cpus 1
+    memory '1 GB'
+    time '30m'
 
-process HapIBD {
-   errorStrategy "retry"
-   maxRetries 1
-   publishDir 'test_Results_200bp', pattern: '*.hapibd.header.ibd.gz', mode: "copy"
-   beforeScript 'module load bcftools'
+    publishDir "${params.outdir}/qc",
+        pattern: 'cohort.samples.txt',
+        mode: 'copy',
+        overwrite: true
 
-   input:
-   tuple val(chromosome), path(genotype), path(map), path(gap), val(removegap)
-   path(hapibd)
-   val(min_size)
-   val(min_markers)
+    input:
+    path sample_files
 
-   output:
-   tuple (val(chromosome), path("${genotype.getBaseName()}.ibd"), path("header.tmp"), emit: hapfiles)
-   path("*.hapibd.header.ibd.gz")
-   //tuple val(chromosome), path("*.hapibd.header.ibd.gz")
+    output:
+    path 'cohort.samples.txt'
 
+    script:
+    """
+    cp ${sample_files[0]} cohort.samples.txt
 
-   script:
-   """
-   java -Xmx100g -jar ${hapibd} gt=${genotype} min-output=${min_size} min-markers=${min_markers} out=${genotype.getBaseName()} map=${map} nthreads=$task.cpus
-   gunzip ${genotype.getBaseName()}.ibd.gz
-
-   #add header to the output file
-   echo "SAMPLE1 HAP_INDEX1      SAMPLE2 HAP_INDEX2      CHROM   START   END     GEN_LENGTH"  > header.tmp
-
-   #remove IBD overlapping gaps in the genome
-   if [ ${removegap} == "true" ]
-   then
-           FILENAME=${gap}
-           IFS=\$'\t'
-           while read CHOM START END TYPE; do
-                awk -v a=\$START -v b=\$END '{ if (!( (\$6<=a && \$7>=a) || (\$6<=b && \$7>=b) || (\$6>=a && \$7<=b) )) { print }}' ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.tmp
-                mv ${genotype.getBaseName()}.ibd.tmp ${genotype.getBaseName()}.ibd
-           done < \$FILENAME
-
-           #add header to the ibd output file
-           cat header.tmp ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.nogap.hapibd.header.ibd
-           bgzip -c ${genotype.getBaseName()}.nogap.hapibd.header.ibd > ${genotype.getBaseName()}.nogap.hapibd.header.ibd.gz
-
-   else
-           #add header to the ibd output file
-           cat header.tmp ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.hapibd.header.ibd
-           bgzip -c ${genotype.getBaseName()}.hapibd.header.ibd > ${genotype.getBaseName()}.hapibd.header.ibd.gz
-
-   fi
-   """
+    for sample_file in ${sample_files.join(' ')}
+    do
+        if ! cmp -s cohort.samples.txt \${sample_file}
+        then
+            echo "ERROR: sample IDs or sample ordering differ between chromosomes." >&2
+            exit 1
+        fi
+    done
+    """
 }
 
 
+/*
+ * Interpolate genetic positions for the variants retained after QC.
+ *
+ * The generated map contains exactly the markers present in the
+ * chromosome-specific QC-filtered VCF.
+ */
+process GENETIC_MAP {
+    tag "chr${chromosome}"
 
-process PhaseIBD {
-   cpus 1
+    cpus params.resources.map.cpus
+    memory params.resources.map.memory
+    time params.resources.map.time
 
-   errorStrategy "retry"
-   maxRetries 1
-   publishDir 'test_Results_200bp', pattern: '*.phaseibd.header.ibd.gz', mode: "copy"
-   beforeScript "source ${params.virtualenv} ; module load bcftools"
+    beforeScript """
+    module load StdEnv/2020
+    module load plink/1.9b_6.21-x86_64
+    """
 
+    errorStrategy 'terminate'
 
-   input:
-   tuple val(chromosome), path(genotype), path(map), path(gap), val(removegap)
-   path(phaseibd)
-   val(min_size)
-   val(min_markers)
+    publishDir "${params.outdir}/maps",
+        pattern: '*.custom.map',
+        mode: 'copy',
+        overwrite: true
 
-   output:
-   tuple (val(chromosome), path("${genotype.getBaseName()}.ibd"), path("${genotype.getBaseName()}.ibd.header"), emit: phasefiles)
-   path("*.phaseibd.header.ibd.gz")
+    input:
+    tuple val(chromosome),
+          path(vcf),
+          path(index),
+          path(map),
+          path(gap)
 
+    output:
+    tuple val(chromosome),
+          path(vcf),
+          path(index),
+          path("chr${chromosome}.custom.map"),
+          path(gap)
 
-   """
+    script:
+    """
+    plink \
+        --vcf ${vcf} \
+        --cm-map ${map} ${chromosome} \
+        --double-id \
+        --make-bed \
+        --out chr${chromosome}.custom
 
-   echo "index,VCF_ID" | sed 's/,/\t/g' > ${genotype}.id
-   bcftools query -l ${genotype} | awk '{print int((NR-1)) " " \$0}' | sed 's/ /\t/g' >> ${genotype}.id
-
-   #Unzip the vcf for phaseIBD to run
-   gunzip -c ${genotype} > ${genotype.getBaseName()}
-
-   python3 ${phaseibd} ${genotype.getBaseName()} ${chromosome} ${genotype.getBaseName()} ${map} ${genotype}.id ${min_size} ${min_markers}
-
-
-   #remove IBD overlapping gaps in the genome
-   if [ ${removegap} == "true" ]
-   then
-           head -1 ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.header
-           sed -i '1d' ${genotype.getBaseName()}.ibd
-
-           FILENAME=${gap}
-           IFS=\$'\t'
-           while read CHOM START END TYPE; do
-                awk -v a=\$START -v b=\$END '{ if (!( (\$10<=a && \$11>=a) || (\$10<=b && \$11>=b) || (\$10>=a && \$11<=b) )) { print }}' ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.ibd.tmp
-                mv ${genotype.getBaseName()}.ibd.tmp ${genotype.getBaseName()}.ibd
-           done < \$FILENAME
-
-           cat ${genotype.getBaseName()}.ibd.header ${genotype.getBaseName()}.ibd > ${genotype.getBaseName()}.nogap.phaseibd.header.ibd
-          bgzip -c ${genotype.getBaseName()}.nogap.phaseibd.header.ibd > ${genotype.getBaseName()}.nogap.phaseibd.header.ibd.gz
-
-   else
-           mv ${genotype.getBaseName()}.ibd ${genotype.getBaseName()}.phaseibd.header.ibd
-           bgzip -c ${genotype.getBaseName()}.phaseibd.header.ibd > ${genotype.getBaseName()}.phaseibd.header.ibd.gz
-   fi
-   """
+    awk '
+        BEGIN {
+            OFS = "\\t"
+        }
+        {
+            print \$1, ".", \$3, \$4
+        }
+    ' chr${chromosome}.custom.bim \
+        > chr${chromosome}.custom.map
+    """
 }
 
 
+/*
+ * Detect IBD segments using Hap-IBD.
+ *
+ * If gap removal is enabled, any complete IBD segment overlapping
+ * at least one gap interval is removed.
+ */
+process HAP_IBD {
+    tag "chr${chromosome}"
 
-process PerPairHapIBD {
-   cpus 1
+    cpus params.resources.hapibd.cpus
+    memory params.resources.hapibd.memory
+    time params.resources.hapibd.time
 
-   publishDir 'test_Results_200bp', pattern: '*.per_pair.ibd', mode: "copy"
-   beforeScript "source ${params.virtualenv} ; module load bcftools"
+    beforeScript """
+    module load java/25.36
+    module load bcftools
+    module load bedtools
+    """
 
+    errorStrategy 'retry'
+    maxRetries 1
 
-   input:
-   tuple val(chromosome), path(ibd_file), path(header)
-   val(method)
-   path(script_per_pair)
+    publishDir "${params.outdir}/segments",
+        pattern: '*.hapibd.ibd.gz',
+        mode: 'copy',
+        overwrite: true
 
-   output:
-   tuple val(chromosome), path("${method}.${chromosome}.per_pair.ibd"), path(header)
+    publishDir "${params.outdir}/logs",
+        pattern: '*.hapibd.log',
+        mode: 'copy',
+        overwrite: true
 
+    input:
+    tuple val(chromosome),
+          path(vcf),
+          path(index),
+          path(map),
+          path(gap)
 
-   """
-   python3 ${script_per_pair} ${ibd_file} ${method}.${chromosome}.per_pair.ibd $chromosome $method
-   #bgzip -c ${method}.${chromosome}.per_pair.ibd > ${method}.${chromosome}.per_pair.ibd.gz
-   """
+    path hapibd
+
+    output:
+    tuple val(chromosome),
+          path("chr${chromosome}.hapibd.ibd.gz"),
+          emit: segments
+
+    path "chr${chromosome}.hapibd.log",
+          emit: logs
+
+    script:
+    def javaGb = Math.max(
+        1,
+        (task.memory.giga * 0.90) as int
+    )
+
+    def filterGaps = params.remove_gaps \
+        ? """
+          awk '
+              BEGIN {
+                  OFS = "\\t"
+              }
+              {
+                  bed_start = \\$6 - 1
+                  if (bed_start < 0) {
+                      bed_start = 0
+                  }
+
+                  print \\$5, bed_start, \\$7, \\$0
+              }
+          ' chr${chromosome}.raw.ibd |
+              bedtools intersect \
+                  -v \
+                  -a - \
+                  -b ${gap} |
+              cut -f4- \
+              > chr${chromosome}.filtered.ibd
+          """ \
+        : """
+          cp \
+              chr${chromosome}.raw.ibd \
+              chr${chromosome}.filtered.ibd
+          """
+
+    """
+    set -o pipefail
+
+    java \
+        -Xmx${javaGb}g \
+        -jar ${hapibd} \
+        gt=${vcf} \
+        map=${map} \
+        out=chr${chromosome}.raw \
+        min-seed=${params.hapibd.min_seed_cm} \
+        min-extend=${params.hapibd.min_extend_cm} \
+        min-output=${params.hapibd.min_output_cm} \
+        min-markers=${params.hapibd.min_markers} \
+        min-mac=${params.hapibd.min_mac} \
+        max-gap=${params.hapibd.max_gap_bp} \
+        nthreads=${task.cpus}
+
+    mv \
+        chr${chromosome}.raw.log \
+        chr${chromosome}.hapibd.log
+
+    gunzip -c \
+        chr${chromosome}.raw.ibd.gz \
+        > chr${chromosome}.raw.ibd
+
+    ${filterGaps}
+
+    bgzip -c \
+        chr${chromosome}.filtered.ibd \
+        > chr${chromosome}.hapibd.ibd.gz
+    """
 }
 
 
-process PerPairPhaseIBD {
-   cpus 1
+/*
+ * Generate a pair-level IBD summary for each chromosome.
+ */
+process PER_PAIR_CHROMOSOME {
+    tag "chr${chromosome}"
 
-   publishDir 'test_Results_200bp', pattern: '*.per_pair.ibd', mode: "copy"
-   beforeScript "source ${params.virtualenv} ; module load bcftools"
+    cpus params.resources.summary.cpus
+    memory params.resources.summary.memory
+    time params.resources.summary.time
 
+    beforeScript """
+    source ${params.python_venv}/bin/activate
+    """
 
-   input:
-   tuple val(chromosome), path(ibd_file), path(header)
-   val(method)
-   path(script_per_pair)
+    publishDir "${params.outdir}/per_pair/by_chromosome",
+        pattern: '*.per_pair.tsv.gz',
+        mode: 'copy',
+        overwrite: true
 
-   output:
-   tuple val(chromosome), path("${method}.${chromosome}.per_pair.ibd"), path(header)
+    input:
+    tuple val(chromosome), path(ibd_file)
+    path summary_script
 
+    output:
+    tuple val(chromosome),
+          path("chr${chromosome}.per_pair.tsv.gz")
 
-   """
-   python3 ${script_per_pair} ${ibd_file} ${method}.${chromosome}.per_pair.ibd $chromosome $method
-   #bgzip -c ${method}.${chromosome}.per_pair.ibd > ${method}.${chromosome}.per_pair.ibd.gz
-   """
+    script:
+    """
+    python3 ${summary_script} \
+        --input ${ibd_file} \
+        --output chr${chromosome}.per_pair.tsv.gz \
+        --threshold-cm ${params.summary.segment_threshold_cm}
+    """
 }
 
 
-process MergeIBD {
-   cpus 1
+/*
+ * Combine the chromosome-specific Hap-IBD results and calculate
+ * genome-wide pair-level summary statistics.
+ */
+process PER_PAIR_GENOMEWIDE {
+    tag 'genome-wide summary'
 
-   publishDir 'test_Results_200bp', pattern: '*.merged.ibd.gz', mode: "copy"
-   beforeScript "module load bcftools"
+    cpus params.resources.summary.cpus
+    memory params.resources.summary.memory
+    time params.resources.summary.time
 
+    beforeScript """
+    source ${params.python_venv}/bin/activate
+    """
 
-   input:
-   tuple val(chromosome), path(ibd_files), path(header)
+    publishDir "${params.outdir}/per_pair",
+        pattern: 'genomewide.per_pair.tsv.gz',
+        mode: 'copy',
+        overwrite: true
 
-   output:
-   tuple val(chromosome), path("$ibd_files.getSimpleName().merged.ibd.gz")
+    input:
+    path ibd_files
+    path summary_script
 
+    output:
+    path 'genomewide.per_pair.tsv.gz'
 
-   """
-   cat $header > $ibd_files.getSimpleName().merged.ibd
-   for f in ${ibd_files}; do cat \${f} >> $ibd_files.getSimpleName().merged.ibd ; done
-   bgzip -c $ibd_files.getSimpleName().merged.ibd > $ibd_files.getSimpleName().merged.ibd.gz
-   """
+    script:
+    """
+    python3 ${summary_script} \
+        --input ${ibd_files.join(' ')} \
+        --output genomewide.per_pair.tsv.gz \
+        --threshold-cm ${params.summary.segment_threshold_cm}
+    """
 }
 
 
+/*
+ * Apply recursive Louvain or Leiden clustering to the genome-wide
+ * weighted IBD-sharing graph.
+ */
+process CLUSTER_GRAPH {
+    tag "${method} recursive clustering"
 
+    cpus params.resources.clustering.cpus
+    memory params.resources.clustering.memory
+    time params.resources.clustering.time
 
+    beforeScript """
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir "${params.outdir}/clustering/${method}",
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(method), val(max_levels)
+    path pair_summary
+    path samples
+    path clustering_script
+
+    output:
+    path "${method}.membership.tsv.gz"
+    path "${method}.selected_membership.tsv.gz"
+    path "${method}.diagnostics.tsv"
+    path "${method}.cluster_sizes.tsv"
+
+    script:
+    """
+    python3 ${clustering_script} \
+        --edges ${pair_summary} \
+        --samples ${samples} \
+        --method ${method} \
+        --max-levels ${max_levels} \
+        --weight-column ${params.clustering.weight_column} \
+        --min-cluster-size ${params.clustering.min_cluster_size} \
+        --min-modularity-gain ${params.clustering.min_modularity_gain} \
+        --resolution ${params.clustering.leiden_resolution} \
+        --seed ${params.clustering.seed} \
+        --auto-select ${params.clustering.auto_select} \
+        --output-prefix ${method}
+    """
+}
 
 
 workflow {
+    /*
+     * Validate required configuration parameters.
+     */
+    if (!params.input_pattern) {
+        error 'Set params.input_pattern.'
+    }
 
-   geneticMaps_out = Channel.from(params.chromosomes).map { chr -> [ "${chr}" , params.genoFile + ".chr${chr}.vcf.gz",  params.geneticMap + ".chr${chr}." + params.assembly +".gmap",  params.gapfile + params.assembly + ".chr${chr}.gap.bed", params.removeGaps] } | geneticMap
+    if (!params.genetic_map_pattern) {
+        error 'Set params.genetic_map_pattern.'
+    }
 
-   hapIBD_out =  HapIBD(geneticMaps_out, params.hapibd, params.minimun_size, params.minimum_markers)
+    if (params.remove_gaps && !params.gap_pattern) {
+        error 'Set params.gap_pattern when remove_gaps=true.'
+    }
 
-   phaseIBD_out = PhaseIBD(geneticMaps_out, params.phaseibd, params.minimun_size, params.minimum_markers)
+    if (!(params.chromosomes as List)) {
+        error 'params.chromosomes must contain at least one chromosome.'
+    }
 
-   IBD_pair_hapIBD = PerPairHapIBD(hapIBD_out.hapfiles, "HapIBD", params.per_pair)
-   IBD_pair_phaseIBD = PerPairPhaseIBD(phaseIBD_out.phasefiles, "PhaseIBD", params.per_pair)
+    if (params.qc.min_maf < 0 || params.qc.min_maf > 0.5) {
+        error 'params.qc.min_maf must be between 0 and 0.5.'
+    }
 
-   //out_merge_hapIBD = MergeIBD(IBD_pair_HapIBD.groupTuple())
-   //out_merge_phaseIBD = MergeIBD(IBD_pair_PhaseIBD.groupTuple(by: [0, 1]))
+    if (
+        params.qc.max_variant_missingness < 0 ||
+        params.qc.max_variant_missingness > 1
+    ) {
+        error 'params.qc.max_variant_missingness must be between 0 and 1.'
+    }
+
+    if (params.n_louvain < 0 || params.n_leiden < 0) {
+        error 'Clustering refinement depths must be greater than or equal to zero.'
+    }
 
 
+    /*
+     * Construct one input tuple per chromosome.
+     */
+    inputs = Channel
+        .fromList(params.chromosomes as List)
+        .map { chromosome ->
+            def chromosomeString = chromosome as String
+
+            def vcf = file(
+                params.input_pattern.replace('{chr}', chromosomeString),
+                checkIfExists: true
+            )
+
+            def map = file(
+                params.genetic_map_pattern.replace('{chr}', chromosomeString),
+                checkIfExists: true
+            )
+
+            def gap = params.remove_gaps \
+                ? file(
+                    params.gap_pattern.replace('{chr}', chromosomeString),
+                    checkIfExists: true
+                ) \
+                : file(
+                    params.empty_gap_file,
+                    checkIfExists: true
+                )
+
+            tuple(
+                chromosome,
+                vcf,
+                map,
+                gap
+            )
+        }
+
+
+    /*
+     * Perform variant QC and validate the sample lists.
+     */
+    qc = QC_VCF(inputs)
+
+    validatedSamples = VALIDATE_SAMPLES(
+        qc.samples
+            .map { chromosome, samples -> samples }
+            .collect()
+    )
+
+
+    /*
+     * Generate marker-matched maps when requested.
+     */
+    if (params.generate_custom_maps) {
+        customMaps = GENETIC_MAP(qc.vcfs)
+        mapsForHapIBD = customMaps.out
+    } else {
+        mapsForHapIBD = qc.vcfs
+    }
+
+
+    /*
+     * Detect IBD segments.
+     */
+    hapIBD = HAP_IBD(
+        mapsForHapIBD,
+        file(
+            params.hapibd_jar,
+            checkIfExists: true
+        )
+    )
+
+
+    /*
+     * Generate chromosome-specific and genome-wide summaries.
+     */
+    summaryScript = file(
+        params.per_pair_script,
+        checkIfExists: true
+    )
+
+    PER_PAIR_CHROMOSOME(
+        hapIBD.segments,
+        summaryScript
+    )
+
+    genomewideSummary = PER_PAIR_GENOMEWIDE(
+        hapIBD.segments
+            .map { chromosome, segmentFile -> segmentFile }
+            .collect(),
+        summaryScript
+    )
+
+
+    /*
+     * Build the list of requested clustering analyses.
+     */
+    clusteringMethods = []
+
+    if (params.Louvain) {
+        clusteringMethods << tuple(
+            'louvain',
+            params.n_louvain as Integer
+        )
+    }
+
+    if (params.Leiden) {
+        clusteringMethods << tuple(
+            'leiden',
+            params.n_leiden as Integer
+        )
+    }
+
+
+    /*
+     * Run each requested clustering algorithm.
+     *
+     * first() converts the single genome-wide summary and sample-list
+     * outputs into reusable value channels. This allows both Louvain and
+     * Leiden jobs to consume the same files.
+     */
+    if (clusteringMethods) {
+        CLUSTER_GRAPH(
+            Channel.fromList(clusteringMethods),
+            genomewideSummary.out.first(),
+            validatedSamples.out.first(),
+            file(
+                params.clustering_script,
+                checkIfExists: true
+            )
+        )
+    }
 }
-
