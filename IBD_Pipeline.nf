@@ -258,23 +258,56 @@ process HAP_IBD {
 
     def filterGaps = params.remove_gaps \
         ? """
+          vcf_chromosome=\$(
+              bcftools query \
+                  -f '%CHROM\\n' \
+                  ${vcf} |
+              head -n 1
+          )
+    
+          normalized_chromosome=\$(
+              echo "\${vcf_chromosome}" |
+              sed 's/^chr//'
+          )
+    
+          awk \
+              -v target="\${vcf_chromosome}" \
+              -v normalized="\${normalized_chromosome}" \
+              '
+              BEGIN {
+                  OFS = "\\t"
+              }
+    
+              {
+                  bed_chromosome = \$1
+                  sub(/^chr/, "", bed_chromosome)
+    
+                  if (bed_chromosome == normalized) {
+                      print target, \$2, \$3, \$4
+                  }
+              }
+              ' ${gap} \
+              > chr${chromosome}.normalized.gaps.bed
+    
           awk '
               BEGIN {
                   OFS = "\\t"
               }
+    
               {
-                  bed_start = \\$6 - 1
+                  bed_start = \$6 - 1
+    
                   if (bed_start < 0) {
                       bed_start = 0
                   }
-
-                  print \\$5, bed_start, \\$7, \\$0
+    
+                  print \$5, bed_start, \$7, \$0
               }
           ' chr${chromosome}.raw.ibd |
               bedtools intersect \
                   -v \
                   -a - \
-                  -b ${gap} |
+                  -b chr${chromosome}.normalized.gaps.bed |
               cut -f4- \
               > chr${chromosome}.filtered.ibd
           """ \
@@ -283,7 +316,6 @@ process HAP_IBD {
               chr${chromosome}.raw.ibd \
               chr${chromosome}.filtered.ibd
           """
-
     """
     set -o pipefail
 
@@ -453,8 +485,8 @@ workflow {
         error 'Set params.genetic_map_pattern.'
     }
 
-    if (params.remove_gaps && !params.gap_pattern) {
-        error 'Set params.gap_pattern when remove_gaps=true.'
+    if (params.remove_gaps && !params.gap_file) {
+        error 'Set params.gap_file when remove_gaps=true.'
     }
 
     if (!(params.chromosomes as List)) {
@@ -495,15 +527,10 @@ workflow {
                 checkIfExists: true
             )
 
-            def gap = params.remove_gaps \
-                ? file(
-                    params.gap_pattern.replace('{chr}', chromosomeString),
-                    checkIfExists: true
-                ) \
-                : file(
-                    params.empty_gap_file,
-                    checkIfExists: true
-                )
+            def gap = file(
+                params.gap_file,
+                checkIfExists: true
+            )
 
             tuple(
                 chromosome,
