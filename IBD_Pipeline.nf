@@ -11,8 +11,11 @@ nextflow.enable.dsl = 2
 /*
  * Filter variants according to MAF and variant missingness.
  *
- * The process also verifies that all retained genotypes are phased
- * and non-missing, as required by Hap-IBD.
+ * The process also verifies that:
+ * - variants remain after QC;
+ * - the number of samples remains unchanged;
+ * - VCF and genetic-map chromosome identifiers match;
+ * - every retained genotype is phased and non-missing.
  */
 process QC_VCF {
     tag "chr${chromosome}"
@@ -31,67 +34,99 @@ process QC_VCF {
         pattern: '*.qc.stats.txt',
         mode: 'copy',
         overwrite: true
-    
+
     publishDir "${params.outdir}/qc",
-    pattern: '*.qc.summary.tsv',
-    mode: 'copy',
-    overwrite: true
+        pattern: '*.qc.summary.tsv',
+        mode: 'copy',
+        overwrite: true
 
     input:
     tuple val(chromosome),
-          path(vcf),
-          path(genetic_map),
-          path(gap_file)
+        path(vcf),
+        path(vcf_index),
+        path(genetic_map),
+        path(gap_file)
 
     output:
     tuple val(chromosome),
-        path("chr${chromosome}.qc.vcf.gz"),
-        path("chr${chromosome}.qc.vcf.gz.tbi"),
-        path(genetic_map),
-        path(gap_file),
-        emit: vcfs
+          path("chr${chromosome}.qc.vcf.gz"),
+          path("chr${chromosome}.qc.vcf.gz.tbi"),
+          path(genetic_map),
+          path(gap_file),
+          emit: vcfs
 
     tuple val(chromosome),
-        path("chr${chromosome}.samples.txt"),
-        emit: samples
+          path("chr${chromosome}.samples.txt"),
+          emit: samples
 
     path "chr${chromosome}.qc.stats.txt",
-        emit: stats
+          emit: stats
 
     path "chr${chromosome}.qc.summary.tsv",
-        emit: summary
+          emit: summary
 
     script:
     """
     set -euo pipefail
 
-    /*
-    * Count variants and samples before QC.
-    */
+
+    # ------------------------------------------------------------------
+    # Count variants and samples before QC.
+    # ------------------------------------------------------------------
+
     variants_before_qc=\$(
         bcftools index \
-            -n ${vcf}
+            -n \
+            ${vcf}
     )
 
     samples_before_qc=\$(
         bcftools query \
-            -l ${vcf} |
+            -l \
+            ${vcf} |
         wc -l
     )
 
+    if ! [[ "\${variants_before_qc}" =~ ^[0-9]+\$ ]]
+    then
+        echo "ERROR: unable to determine the number of variants before QC." >&2
+        echo "Observed value: \${variants_before_qc}" >&2
+        exit 1
+    fi
 
-    /*
-    * Apply variant-level QC.
-    */
+    if ! [[ "\${samples_before_qc}" =~ ^[0-9]+\$ ]]
+    then
+        echo "ERROR: unable to determine the number of samples before QC." >&2
+        echo "Observed value: \${samples_before_qc}" >&2
+        exit 1
+    fi
+
+    if [[ \${variants_before_qc} -eq 0 ]]
+    then
+        echo "ERROR: the chromosome ${chromosome} input VCF contains no variants." >&2
+        exit 1
+    fi
+
+    if [[ \${samples_before_qc} -eq 0 ]]
+    then
+        echo "ERROR: the chromosome ${chromosome} input VCF contains no samples." >&2
+        exit 1
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Apply variant-level QC.
+    # ------------------------------------------------------------------
+
     bcftools +fill-tags \
         ${vcf} \
         -Ou \
         -- \
         -t MAF,F_MISSING |
-        bcftools view \
-            -i 'MAF>=${params.qc.min_maf} && F_MISSING<=${params.qc.max_variant_missingness}' \
-            -Oz \
-            -o chr${chromosome}.qc.vcf.gz
+    bcftools view \
+        -i 'MAF>=${params.qc.min_maf} && F_MISSING<=${params.qc.max_variant_missingness}' \
+        -Oz \
+        -o chr${chromosome}.qc.vcf.gz
 
     tabix \
         -f \
@@ -99,19 +134,61 @@ process QC_VCF {
         chr${chromosome}.qc.vcf.gz
 
 
-    /*
-    * Count variants and samples after QC.
-    */
+    # ------------------------------------------------------------------
+    # Count variants and samples after QC.
+    # ------------------------------------------------------------------
+
     variants_after_qc=\$(
         bcftools index \
-            -n chr${chromosome}.qc.vcf.gz
+            -n \
+            chr${chromosome}.qc.vcf.gz
     )
 
     samples_after_qc=\$(
         bcftools query \
-            -l chr${chromosome}.qc.vcf.gz |
+            -l \
+            chr${chromosome}.qc.vcf.gz |
         wc -l
     )
+
+    if ! [[ "\${variants_after_qc}" =~ ^[0-9]+\$ ]]
+    then
+        echo "ERROR: unable to determine the number of variants after QC." >&2
+        echo "Observed value: \${variants_after_qc}" >&2
+        exit 1
+    fi
+
+    if ! [[ "\${samples_after_qc}" =~ ^[0-9]+\$ ]]
+    then
+        echo "ERROR: unable to determine the number of samples after QC." >&2
+        echo "Observed value: \${samples_after_qc}" >&2
+        exit 1
+    fi
+
+    if [[ \${variants_after_qc} -eq 0 ]]
+    then
+        echo "ERROR: no variants remained after QC on chromosome ${chromosome}." >&2
+        exit 1
+    fi
+
+    if [[ \${samples_after_qc} -eq 0 ]]
+    then
+        echo "ERROR: no samples remained after QC on chromosome ${chromosome}." >&2
+        exit 1
+    fi
+
+    if [[ \${samples_before_qc} -ne \${samples_after_qc} ]]
+    then
+        echo "ERROR: the number of samples changed during variant-level QC." >&2
+        echo "Before QC: \${samples_before_qc}" >&2
+        echo "After QC:  \${samples_after_qc}" >&2
+        exit 1
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Calculate variant-retention statistics.
+    # ------------------------------------------------------------------
 
     variants_removed=\$(
         awk \
@@ -126,51 +203,36 @@ process QC_VCF {
             -v after="\${variants_after_qc}" \
             '
             BEGIN {
-                if (before == 0) {
-                    print "NA"
-                }
-                else {
-                    printf "%.2f", 100 * after / before
-                }
+                printf "%.2f", 100 * after / before
             }
             '
     )
 
 
-    /*
-    * Write the complete sample list.
-    */
+    # ------------------------------------------------------------------
+    # Write the complete sample list.
+    # ------------------------------------------------------------------
+
     bcftools query \
-        -l chr${chromosome}.qc.vcf.gz \
+        -l \
+        chr${chromosome}.qc.vcf.gz \
         > chr${chromosome}.samples.txt
 
-    if [[ \${samples_after_qc} -eq 0 ]]
+    if [[ ! -s chr${chromosome}.samples.txt ]]
     then
-        echo "ERROR: no samples were found in the chromosome ${chromosome} VCF." >&2
-        exit 1
-    fi
-
-    if [[ \${variants_after_qc} -eq 0 ]]
-    then
-        echo "ERROR: no variants remained after QC on chromosome ${chromosome}." >&2
-        exit 1
-    fi
-
-    if [[ \${samples_before_qc} -ne \${samples_after_qc} ]]
-    then
-        echo "ERROR: the number of samples changed during variant-level QC." >&2
-        echo "Before QC: \${samples_before_qc}" >&2
-        echo "After QC: \${samples_after_qc}" >&2
+        echo "ERROR: the chromosome ${chromosome} sample list is empty." >&2
         exit 1
     fi
 
 
-    /*
-    * Verify compatibility between VCF and genetic-map chromosome names.
-    */
+    # ------------------------------------------------------------------
+    # Verify VCF and genetic-map chromosome identifiers.
+    # ------------------------------------------------------------------
+
     vcf_chromosome=\$(
         bcftools index \
-            -s chr${chromosome}.qc.vcf.gz |
+            -s \
+            chr${chromosome}.qc.vcf.gz |
         awk 'NR == 1 { print \$1 }'
     )
 
@@ -183,9 +245,15 @@ process QC_VCF {
         ' ${genetic_map}
     )
 
-    if [[ -z "\${vcf_chromosome}" || -z "\${map_chromosome}" ]]
+    if [[ -z "\${vcf_chromosome}" ]]
     then
-        echo "ERROR: unable to read the chromosome identifier from the VCF or genetic map." >&2
+        echo "ERROR: unable to read the chromosome identifier from the QC-filtered VCF." >&2
+        exit 1
+    fi
+
+    if [[ -z "\${map_chromosome}" ]]
+    then
+        echo "ERROR: unable to read the chromosome identifier from the genetic map." >&2
         exit 1
     fi
 
@@ -199,31 +267,36 @@ process QC_VCF {
     fi
 
 
-    /*
-    * Verify that all retained genotypes are phased and non-missing.
-    */
+    # ------------------------------------------------------------------
+    # Verify that every retained genotype is phased and non-missing.
+    #
+    # AWK scans the complete stream rather than exiting early. This
+    # prevents bcftools from receiving SIGPIPE under `set -o pipefail`.
+    # ------------------------------------------------------------------
+
     if bcftools query \
         -f '[%GT\\n]' \
         chr${chromosome}.qc.vcf.gz |
-        awk '
-            index(\$0, "/") || index(\$0, ".") {
-                invalid = 1
-            }
+    awk '
+        index(\$0, "/") || index(\$0, ".") {
+            invalid = 1
+        }
 
-            END {
-                exit !invalid
-            }
-        '
+        END {
+            exit !invalid
+        }
+    '
     then
         echo "ERROR: chr${chromosome}.qc.vcf.gz contains an unphased or missing genotype." >&2
-        echo "Hap-IBD requires all genotypes to be phased and non-missing." >&2
+        echo "Hap-IBD requires every genotype to be phased and non-missing." >&2
         exit 1
     fi
 
 
-    /*
-    * Write a concise QC summary.
-    */
+    # ------------------------------------------------------------------
+    # Write the concise QC summary.
+    # ------------------------------------------------------------------
+
     printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \
         chromosome \
         samples \
@@ -247,15 +320,15 @@ process QC_VCF {
         >> chr${chromosome}.qc.summary.tsv
 
 
-    /*
-    * Retain the detailed bcftools report.
-    */
+    # ------------------------------------------------------------------
+    # Write the detailed bcftools statistics report.
+    # ------------------------------------------------------------------
+
     bcftools stats \
         chr${chromosome}.qc.vcf.gz \
         > chr${chromosome}.qc.stats.txt
     """
 }
-
 
 /*
  * Confirm that sample IDs and their ordering are identical across
@@ -479,6 +552,7 @@ process HAP_IBD {
 }
 
 
+
 /*
  * Generate pair-level IBD summary statistics for each chromosome.
  */
@@ -627,6 +701,10 @@ workflow {
      */
     if (!params.input_pattern) {
         error 'Set params.input_pattern.'
+    }
+
+    if (!params.input_index_pattern) {
+        error 'Set params.input_index_pattern.'
     }
 
     if (!params.hapibd_jar) {
@@ -794,6 +872,14 @@ workflow {
                 checkIfExists: true
             )
 
+            def vcfIndex = file(
+                params.input_index_pattern.replace(
+                    '{chr}',
+                    chromosomeString
+                ),
+                checkIfExists: true
+            )
+
             def geneticMap = file(
                 "${geneticMapDirectory}/${geneticMapPrefix}${chromosomeString}.GRCh38.map",
                 checkIfExists: true
@@ -802,6 +888,7 @@ workflow {
             tuple(
                 chromosome,
                 vcf,
+                vcfIndex,
                 geneticMap,
                 excludedRegions
             )
