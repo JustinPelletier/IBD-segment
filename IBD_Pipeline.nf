@@ -259,11 +259,15 @@ process HAP_IBD {
     def filterGaps = params.remove_gaps \
         ? """
           vcf_chromosome=\$(
-              bcftools query \
-                  -f '%CHROM\\n' \
-                  ${vcf} |
-              head -n 1
+              bcftools index -s ${vcf} |
+              awk 'NR == 1 { print \$1 }'
           )
+    
+          if [[ -z "\${vcf_chromosome}" ]]
+          then
+              echo "ERROR: unable to determine the chromosome name from ${vcf}." >&2
+              exit 1
+          fi
     
           normalized_chromosome=\$(
               echo "\${vcf_chromosome}" |
@@ -289,27 +293,36 @@ process HAP_IBD {
               ' ${gap} \
               > chr${chromosome}.normalized.gaps.bed
     
-          awk '
-              BEGIN {
-                  OFS = "\\t"
-              }
+          if [[ ! -s chr${chromosome}.normalized.gaps.bed ]]
+          then
+              echo "WARNING: no excluded regions were found for chromosome \${vcf_chromosome}." >&2
     
-              {
-                  bed_start = \$6 - 1
-    
-                  if (bed_start < 0) {
-                      bed_start = 0
+              cp \
+                  chr${chromosome}.raw.ibd \
+                  chr${chromosome}.filtered.ibd
+          else
+              awk '
+                  BEGIN {
+                      OFS = "\\t"
                   }
     
-                  print \$5, bed_start, \$7, \$0
-              }
-          ' chr${chromosome}.raw.ibd |
-              bedtools intersect \
-                  -v \
-                  -a - \
-                  -b chr${chromosome}.normalized.gaps.bed |
-              cut -f4- \
-              > chr${chromosome}.filtered.ibd
+                  {
+                      bed_start = \$6 - 1
+    
+                      if (bed_start < 0) {
+                          bed_start = 0
+                      }
+    
+                      print \$5, bed_start, \$7, \$0
+                  }
+              ' chr${chromosome}.raw.ibd |
+                  bedtools intersect \
+                      -v \
+                      -a - \
+                      -b chr${chromosome}.normalized.gaps.bed |
+                  cut -f4- \
+                  > chr${chromosome}.filtered.ibd
+          fi
           """ \
         : """
           cp \
