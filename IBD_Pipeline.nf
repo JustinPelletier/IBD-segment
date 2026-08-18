@@ -589,17 +589,26 @@ process PER_PAIR_CHROMOSOME {
     """
     set -euo pipefail
 
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
     python3 ${summary_script} \
         --input ${ibd_file} \
         --output chr${chromosome}.per_pair.tsv.gz \
-        --threshold-cm ${params.summary.segment_threshold_cm}
+        --threshold-cm ${params.summary.segment_threshold_cm} \
+        --temporary-directory "\${SLURM_TMPDIR}"
     """
 }
 
 
 /*
- * Calculate genome-wide pair-level IBD summary statistics across
- * all chromosome-specific Hap-IBD segment files.
+ * Combine chromosome-specific pair summaries into a genome-wide
+ * pair-level summary.
+ *
+ * This avoids rereading all raw Hap-IBD segment files.
  */
 process PER_PAIR_GENOMEWIDE {
     tag 'genome-wide summary'
@@ -621,7 +630,7 @@ process PER_PAIR_GENOMEWIDE {
         overwrite: true
 
     input:
-    path ibd_files
+    path chromosome_summaries
     path summary_script
 
     output:
@@ -631,10 +640,18 @@ process PER_PAIR_GENOMEWIDE {
     """
     set -euo pipefail
 
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
     python3 ${summary_script} \
-        --input ${ibd_files.join(' ')} \
+        --input ${chromosome_summaries.join(' ')} \
         --output genomewide.per_pair.tsv.gz \
-        --threshold-cm ${params.summary.segment_threshold_cm}
+        --threshold-cm ${params.summary.segment_threshold_cm} \
+        --aggregate-summaries \
+        --temporary-directory "\${SLURM_TMPDIR}"
     """
 }
 
@@ -923,15 +940,15 @@ workflow {
     /*
      * Generate chromosome-specific and genome-wide pair summaries.
      */
-    PER_PAIR_CHROMOSOME(
+    chromosomePairSummaries = PER_PAIR_CHROMOSOME(
         hapIBD.segments,
         summaryScript
     )
 
     genomewideSummary = PER_PAIR_GENOMEWIDE(
-        hapIBD.segments
-            .map { chromosome, segmentFile ->
-                segmentFile
+        chromosomePairSummaries
+            .map { chromosome, summaryFile ->
+                summaryFile
             }
             .collect(),
         summaryScript
