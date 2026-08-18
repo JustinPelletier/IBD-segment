@@ -11,8 +11,8 @@ The graph is constructed from:
 Every sample is added as a vertex, including participants with no detected
 IBD-sharing edges. Such participants remain in the graph as isolated nodes.
 
-Recursive clustering
---------------------
+Fixed-depth recursive clustering
+--------------------------------
 Level 0 assigns the complete cohort to one initial community.
 
 At level 1, the selected clustering algorithm is applied to the complete graph.
@@ -21,16 +21,11 @@ At each subsequent level, every sufficiently large community from the previous
 level is independently submitted to the same clustering algorithm. Communities
 smaller than --min-cluster-size remain in the output but are not refined again.
 
-Automatic level selection
--------------------------
-When --auto-select=true:
-
-1. Global weighted modularity is calculated at every refinement level.
-2. Refinement stops after a level whose modularity gain is smaller than
-   --min-modularity-gain.
-3. The computed level with the highest global weighted modularity is selected.
-
-When --auto-select=false, the deepest successfully computed level is selected.
+Exactly --max-levels levels are written. When no eligible parent community can
+be split at a level, its labels are carried forward unchanged. Global weighted
+modularity is reported as a diagnostic but never controls refinement or selects
+the final level. The deepest requested level is always the terminal membership
+used by downstream FST clumping.
 """
 
 import argparse
@@ -42,7 +37,7 @@ import random
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import IO, Iterable, Optional
+from typing import IO, Iterable
 
 import igraph as ig
 
@@ -128,11 +123,12 @@ def parse_arguments() -> argparse.Namespace:
 
     parser.add_argument(
         "--min-modularity-gain",
-        required=True,
+        required=False,
         type=float,
+        default=0.0,
         help=(
-            "Minimum global weighted modularity gain required to continue "
-            "recursive refinement when automatic selection is enabled."
+            "Deprecated compatibility option. Modularity gain is reported "
+            "but does not control fixed-depth refinement."
         ),
     )
 
@@ -155,11 +151,12 @@ def parse_arguments() -> argparse.Namespace:
 
     parser.add_argument(
         "--auto-select",
-        required=True,
+        required=False,
         type=parse_boolean,
+        default=False,
         help=(
-            "If true, stop after insufficient modularity improvement and "
-            "select the computed level with the highest modularity."
+            "Deprecated compatibility option. The deepest requested level "
+            "is always used."
         ),
     )
 
@@ -206,9 +203,9 @@ def validate_arguments(args: argparse.Namespace) -> None:
             f"ERROR: sample file does not exist: {args.samples}"
         )
 
-    if args.max_levels < 0:
+    if args.max_levels < 1:
         raise SystemExit(
-            "ERROR: --max-levels must be greater than or equal to zero."
+            "ERROR: --max-levels must be greater than or equal to one."
         )
 
     if args.min_cluster_size < 2:
@@ -430,7 +427,7 @@ def run_leiden(
     Both current and older supported APIs are handled here.
     """
 
-    leiden_arguments = {
+    base_arguments = {
         "objective_function": "modularity",
         "weights": "weight",
         "n_iterations": -1,
@@ -442,12 +439,17 @@ def run_leiden(
         )
 
         if "resolution" in signature.parameters:
-            leiden_arguments["resolution"] = resolution
+            resolution_arguments = {
+                "resolution": resolution
+            }
         else:
-            leiden_arguments["resolution_parameter"] = resolution
+            resolution_arguments = {
+                "resolution_parameter": resolution
+            }
 
         clustering = graph.community_leiden(
-            **leiden_arguments
+            **base_arguments,
+            **resolution_arguments,
         )
 
     except (TypeError, ValueError):
@@ -455,12 +457,12 @@ def run_leiden(
         try:
             clustering = graph.community_leiden(
                 resolution=resolution,
-                **leiden_arguments,
+                **base_arguments,
             )
         except TypeError:
             clustering = graph.community_leiden(
                 resolution_parameter=resolution,
-                **leiden_arguments,
+                **base_arguments,
             )
 
     return clustering.membership
@@ -572,7 +574,7 @@ def refine_membership(
     method: str,
     resolution: float,
     min_cluster_size: int,
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, int, int]:
     """
     Recursively cluster communities from the previous refinement level.
 
@@ -583,10 +585,17 @@ def refine_membership(
 
     communities_split
         Number of parent communities divided into at least two communities.
+
+    communities_eligible
+        Number of parent communities meeting the minimum size.
+
+    communities_carried_forward
+        Number of parent communities whose labels were unchanged.
     """
 
     new_membership = previous_membership.copy()
     communities_split = 0
+    communities_eligible = 0
 
     grouped_vertices = group_vertices_by_community(
         previous_membership
@@ -603,6 +612,8 @@ def refine_membership(
         # Small communities remain in the output but are not refined again.
         if len(vertex_indices) < min_cluster_size:
             continue
+
+        communities_eligible += 1
 
         subgraph = graph.induced_subgraph(
             vertex_indices
@@ -647,26 +658,16 @@ def refine_membership(
 
         communities_split += 1
 
-    return new_membership, communities_split
-
-
-def choose_selected_level(
-    diagnostics: list[dict],
-    auto_select: bool,
-) -> int:
-    """Choose the final clustering refinement level."""
-
-    if not auto_select:
-        return diagnostics[-1]["level"]
-
-    # max() returns the first occurrence when modularity values are tied,
-    # thereby favoring the simpler, shallower partition.
-    selected_diagnostic = max(
-        diagnostics,
-        key=lambda row: row["modularity"],
+    communities_carried_forward = (
+        len(grouped_vertices) - communities_split
     )
 
-    return selected_diagnostic["level"]
+    return (
+        new_membership,
+        communities_split,
+        communities_eligible,
+        communities_carried_forward,
+    )
 
 
 def write_tsv(
@@ -710,6 +711,7 @@ def write_outputs(
     diagnostics: list[dict],
     selected_level: int,
     min_cluster_size: int,
+    max_levels: int,
 ) -> None:
     """Write clustering memberships and diagnostic outputs."""
 
@@ -786,7 +788,9 @@ def write_outputs(
         "number_of_clusters",
         "modularity",
         "modularity_gain",
+        "communities_eligible",
         "communities_split",
+        "communities_carried_forward",
         "selected",
         "stopping_reason",
     ]
@@ -805,7 +809,9 @@ def write_outputs(
                     ".10g",
                 )
             ),
+            row["communities_eligible"],
             row["communities_split"],
+            row["communities_carried_forward"],
             row["level"] == selected_level,
             row["stopping_reason"],
         )
@@ -833,7 +839,10 @@ def write_outputs(
                     level,
                     cluster,
                     cluster_size,
-                    cluster_size >= min_cluster_size,
+                    (
+                        level < max_levels
+                        and cluster_size >= min_cluster_size
+                    ),
                     level == selected_level,
                 )
             )
@@ -845,7 +854,7 @@ def write_outputs(
             "cluster",
             "size",
             "eligible_for_further_refinement",
-            "selected_level",
+            "terminal_level",
         ],
         rows=cluster_size_rows,
     )
@@ -914,12 +923,14 @@ def main() -> None:
             "number_of_clusters": 1,
             "modularity": initial_modularity,
             "modularity_gain": None,
+            "communities_eligible": int(
+                graph.vcount() >= args.min_cluster_size
+            ),
             "communities_split": 0,
+            "communities_carried_forward": 0,
             "stopping_reason": "",
         }
     ]
-
-    stop_reason: Optional[str] = None
 
     for level in range(
         1,
@@ -929,18 +940,18 @@ def main() -> None:
             level - 1
         ]
 
-        new_membership, communities_split = refine_membership(
+        (
+            new_membership,
+            communities_split,
+            communities_eligible,
+            communities_carried_forward,
+        ) = refine_membership(
             graph=graph,
             previous_membership=previous_membership,
             method=args.method,
             resolution=args.resolution,
             min_cluster_size=args.min_cluster_size,
         )
-
-        if communities_split == 0:
-            stop_reason = "no_communities_split"
-            diagnostics[-1]["stopping_reason"] = stop_reason
-            break
 
         memberships[level] = new_membership
 
@@ -962,8 +973,14 @@ def main() -> None:
                 ),
                 "modularity": modularity,
                 "modularity_gain": modularity_gain,
+                "communities_eligible": communities_eligible,
                 "communities_split": communities_split,
-                "stopping_reason": "",
+                "communities_carried_forward": communities_carried_forward,
+                "stopping_reason": (
+                    "fixed_depth_completed"
+                    if level == args.max_levels
+                    else ""
+                ),
             }
         )
 
@@ -972,27 +989,15 @@ def main() -> None:
                 f"{args.method.capitalize()} level {level}: "
                 f"{len(set(new_membership)):,} clusters; "
                 f"modularity={modularity:.6f}; "
-                f"gain={modularity_gain:.6f}."
+                f"gain={modularity_gain:.6f}; "
+                f"eligible={communities_eligible:,}; "
+                f"split={communities_split:,}; "
+                f"carried_forward={communities_carried_forward:,}."
             ),
             file=sys.stderr,
         )
 
-        if (
-            args.auto_select
-            and modularity_gain < args.min_modularity_gain
-        ):
-            stop_reason = "modularity_gain_below_threshold"
-            diagnostics[-1]["stopping_reason"] = stop_reason
-            break
-
-    else:
-        stop_reason = "maximum_refinement_depth_reached"
-        diagnostics[-1]["stopping_reason"] = stop_reason
-
-    selected_level = choose_selected_level(
-        diagnostics=diagnostics,
-        auto_select=args.auto_select,
-    )
+    selected_level = args.max_levels
 
     write_outputs(
         graph=graph,
@@ -1002,18 +1007,19 @@ def main() -> None:
         diagnostics=diagnostics,
         selected_level=selected_level,
         min_cluster_size=args.min_cluster_size,
+        max_levels=args.max_levels,
     )
 
     print(
         (
-            f"Selected {args.method.capitalize()} refinement "
+            f"Terminal {args.method.capitalize()} refinement "
             f"level: {selected_level}"
         ),
         file=sys.stderr,
     )
 
     print(
-        f"Stopping reason: {stop_reason}",
+        "Stopping reason: fixed_depth_completed",
         file=sys.stderr,
     )
 
