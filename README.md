@@ -19,8 +19,14 @@ For each configured chromosome, the pipeline:
 4. optionally generates a marker-matched genetic map with PLINK;
 5. detects IBD segments with Hap-IBD;
 6. optionally removes complete segments overlapping genome-gap intervals;
-7. generates chromosome-specific and genome-wide per-pair summaries;
-8. optionally performs recursive Louvain and Leiden clustering.
+7. generates chromosome-specific per-pair summaries;
+8. combines the chromosome summaries into an exact genome-wide per-pair summary;
+9. optionally performs recursive Louvain and Leiden clustering.
+
+The genome-wide summary is generated from chromosome-level sufficient
+statistics rather than by rereading all raw Hap-IBD segment files. This includes
+the sum of squared segment lengths, allowing the genome-wide mean and standard
+deviation to be calculated correctly across chromosomes.
 
 PhaseIBD and the former `MergeIBD` process are not included in version 2.
 
@@ -32,6 +38,13 @@ IBD-segment/
 ├── nextflow.config
 ├── Run_IBD.sh
 ├── assets/
+├── bin/
+│   ├── hap-ibd.jar
+│   ├── IBD_per_pair.py
+│   ├── cluster_ibd_graph.py
+│   └── HapMap/
+│       ├── GRCh37/
+│       └── GRCh38/
 └── plink.GRCh38.map/
     ├── chr_in_chrom_field/
     │   ├── plink.chr1.GRCh38.map
@@ -41,10 +54,6 @@ IBD-segment/
         ├── plink.chr1.GRCh38.map
         ├── ...
         └── plink.chr22.GRCh38.map
-└── bin/
-    ├── hap-ibd.jar
-    ├── IBD_per_pair.py
-    ├── cluster_ibd_graph.py
 ```
 
 ## Input requirements
@@ -86,7 +95,7 @@ environment through `beforeScript` directives.
 | `VALIDATE_SAMPLES` | Standard Linux utilities |
 | `GENETIC_MAP` | `module load StdEnv/2020` and `module load plink/1.9b_6.21-x86_64` |
 | `HAP_IBD` | `module load java/25.36`, `module load bcftools`, and `module load bedtools` |
-| Summary processes | Python virtual environment |
+| Summary processes | Python virtual environment; standard library only |
 | Clustering | Python virtual environment with `igraph` |
 
 Nextflow itself must be loaded before launching the workflow:
@@ -98,16 +107,17 @@ module load nextflow
 ### Python virtual environment
 
 Create the environment once before running the pipeline. The clustering script
-requires `python-igraph`; the per-pair summarization script otherwise uses only
-the Python standard library.
+requires `python-igraph`; the per-pair summarization script uses only the Python
+standard library.
 
 ```bash
-module load python
+module load python/3.14.2
 
-virtualenv --no-download ~/virtualenvs/ibd_pipeline
+python3 -m venv ~/virtualenvs/ibd_pipeline
 source ~/virtualenvs/ibd_pipeline/bin/activate
 
-pip install --no-index igraph
+python3 -m pip install --upgrade pip
+python3 -m pip install igraph
 ```
 
 Confirm that igraph is available:
@@ -191,7 +201,7 @@ When enabled, any complete IBD segment overlapping at least one interval in the
 chromosome-specific BED file is excluded. BED files must use zero-based,
 half-open coordinates and chromosome names matching the Hap-IBD output.
 
-### Per-pair summary threshold
+### Per-pair summaries
 
 ```groovy
 summary {
@@ -201,6 +211,17 @@ summary {
 
 In addition to statistics across all segments, the per-pair summary reports the
 number and total length of segments greater than or equal to this threshold.
+
+Chromosome summaries are first calculated independently. The genome-wide
+process then runs `IBD_per_pair.py --aggregate-summaries` to combine those
+files. All chromosome summaries must have been generated with the same
+`segment_threshold_cm` value and the same version of the script.
+
+The summary processes place their temporary SQLite databases in the node-local
+`$SLURM_TMPDIR`. This is important for performance because SQLite performs many
+random database operations that can be extremely slow on a shared Lustre
+filesystem. Only the final compressed summaries are written to the Nextflow
+work directory and published to the output directory.
 
 ### Clustering
 
@@ -263,9 +284,11 @@ Available and potentially useful values include:
 The names of the last two columns change when `segment_threshold_cm` changes.
 For example, a threshold of `3.0` produces columns ending in `_ge_3_cM`.
 
-`min_IBD_length_cM` and `sd_IBD_length_cM` are technically valid numeric
-columns but are generally not meaningful measures of total pairwise IBD
-sharing and are not recommended as graph weights.
+`min_IBD_length_cM`, `sd_IBD_length_cM`, and
+`sum_squared_IBD_length_cM` are valid numeric columns but are not meaningful
+measures of total pairwise IBD sharing and are not recommended as graph
+weights. The squared-length column is retained as a sufficient statistic for
+exact aggregation of chromosome summaries.
 
 ### Computational resources
 
@@ -276,10 +299,15 @@ resources {
     qc         { cpus = 2; memory = '8 GB';   time = '2h' }
     map        { cpus = 1; memory = '8 GB';   time = '2h' }
     hapibd     { cpus = 8; memory = '175 GB'; time = '4h' }
-    summary    { cpus = 1; memory = '8 GB';   time = '12h' }
+    summary    { cpus = 1; memory = '16 GB';  time = '48h' }
     clustering { cpus = 4; memory = '32 GB';  time = '12h' }
 }
 ```
+
+The summarization implementation is single-threaded, so allocating additional
+CPUs does not substantially accelerate it. Node-local SQLite storage is more
+important for summary performance. Large cohorts or unusually dense IBD output
+may require additional memory or wall time.
 
 ## Running the pipeline
 
@@ -356,6 +384,7 @@ Each per-pair summary contains:
 - `ID1` and `ID2`;
 - `number_of_IBD_segments`;
 - `total_IBD_length_cM`;
+- `sum_squared_IBD_length_cM`;
 - `mean_IBD_length_cM`;
 - `min_IBD_length_cM`;
 - `max_IBD_length_cM`;
@@ -364,9 +393,13 @@ Each per-pair summary contains:
 - total length of segments at or above the threshold.
 
 Only pairs sharing at least one detected segment are written. Pairs absent from
-the summary implicitly have zero IBD sharing. The complete `cohort.samples.txt`
-file is supplied to the clustering script so participants without detected
-edges remain present as isolated graph vertices.
+the summary implicitly have zero IBD sharing. Sample IDs are placed in a
+consistent order so `ID1-ID2` and `ID2-ID1` are treated as the same pair.
+
+The standard deviation is the population standard deviation across all
+segments observed for a pair. The complete `cohort.samples.txt` file is
+supplied to the clustering script so participants without detected edges remain
+present as isolated graph vertices.
 
 ### Clustering outputs
 
@@ -384,6 +417,48 @@ formal estimate of the true number of populations. Final clusters should also
 be evaluated for stability, size, genetic composition, geography, ancestry and
 biological interpretability.
 
+## Validating the genome-wide summary
+
+First verify that the compressed output is intact:
+
+```bash
+gzip -t results/per_pair/genomewide.per_pair.tsv.gz && \
+echo "PASS: gzip file is valid"
+```
+
+The total number of segments in the genome-wide summary must exactly equal the
+sum across the 22 chromosome summaries:
+
+```bash
+chromosome_segments=$(
+    for file in results/per_pair/by_chromosome/chr*.per_pair.tsv.gz
+    do
+        zcat "$file" |
+        awk 'NR > 1 {sum += $3} END {printf "%.0f\n", sum}'
+    done |
+    awk '{sum += $1} END {printf "%.0f\n", sum}'
+)
+
+genomewide_segments=$(
+    zcat results/per_pair/genomewide.per_pair.tsv.gz |
+    awk 'NR > 1 {sum += $3} END {printf "%.0f\n", sum}'
+)
+
+printf 'Chromosome total: %s\n' "$chromosome_segments"
+printf 'Genome-wide total: %s\n' "$genomewide_segments"
+
+if [[ "$chromosome_segments" == "$genomewide_segments" ]]
+then
+    echo "PASS: all IBD segments were aggregated"
+else
+    echo "FAIL: segment totals differ"
+fi
+```
+
+Total IBD length can also be compared. A negligible difference may occur due
+to decimal formatting and floating-point rounding when chromosome summaries
+are written and reread.
+
 ## Standalone script usage
 
 Create a summary for one chromosome:
@@ -394,8 +469,25 @@ source ~/virtualenvs/ibd_pipeline/bin/activate
 python3 bin/IBD_per_pair.py \
     --input chr1.hapibd.ibd.gz \
     --output chr1.per_pair.tsv.gz \
-    --threshold-cm 5
+    --threshold-cm 5 \
+    --temporary-directory "${SLURM_TMPDIR:-.}"
 ```
+
+Combine chromosome summaries into a genome-wide summary:
+
+```bash
+python3 bin/IBD_per_pair.py \
+    --input chr*.per_pair.tsv.gz \
+    --output genomewide.per_pair.tsv.gz \
+    --threshold-cm 5 \
+    --aggregate-summaries \
+    --temporary-directory "${SLURM_TMPDIR:-.}"
+```
+
+For large inputs on SLURM, node-local `$SLURM_TMPDIR` is strongly recommended.
+When running outside a SLURM allocation, provide another local temporary
+directory if available rather than placing the SQLite database on a shared
+network filesystem.
 
 Run Louvain clustering directly:
 
