@@ -2,7 +2,7 @@
  * Hap-IBD segment-detection pipeline
  *
  * Author: Justin Pelletier
- * Version: 2.1
+ * Version: 2.2
  */
 
 nextflow.enable.dsl = 2
@@ -687,7 +687,10 @@ process CLUSTER_GRAPH {
     path clustering_script
 
     output:
-    path "${method}.membership.tsv.gz"
+    tuple val(method),
+          path("${method}.membership.tsv.gz"),
+          emit: membership
+
     path "${method}.selected_membership.tsv.gz"
     path "${method}.diagnostics.tsv"
     path "${method}.cluster_sizes.tsv"
@@ -707,6 +710,204 @@ process CLUSTER_GRAPH {
         --resolution ${params.clustering.leiden_resolution} \
         --seed ${params.clustering.seed} \
         --auto-select ${params.clustering.auto_select} \
+        --output-prefix ${method}
+    """
+}
+
+
+/*
+ * Prepare an autosomal, common, high-quality, LD-pruned PLINK 2
+ * dataset for genotype-based FST estimation.
+ *
+ * The chromosome VCFs have already passed the Hap-IBD QC step. This
+ * process applies a separate, configurable FST-specific filter because
+ * FST estimation and graph construction have different requirements.
+ * The concatenated BCF is written to node-local storage and removed at
+ * the end of the task.
+ */
+process PREPARE_FST_DATA {
+    tag 'prepare FST genotype data'
+
+    cpus params.resources.fst_prepare.cpus
+    memory params.resources.fst_prepare.memory
+    time params.resources.fst_prepare.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load bcftools
+    module load ${params.plink2_module}
+    """
+
+    publishDir "${params.outdir}/fst/genotypes",
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    path qc_vcfs
+
+    output:
+    tuple path('fst.pruned.pgen'),
+          path('fst.pruned.pvar.zst'),
+          path('fst.pruned.psam'),
+          emit: dataset
+
+    path 'fst.prune.in',
+         emit: variants
+
+    path 'fst.prepare.summary.tsv',
+         emit: summary
+
+    path 'fst.prepare.log',
+         emit: log
+
+    script:
+    """
+    set -euo pipefail
+
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
+    merged_bcf="\${SLURM_TMPDIR}/fst.autosomes.bcf"
+
+    bcftools concat \
+        --output-type b \
+        --output "\${merged_bcf}" \
+        ${qc_vcfs.join(' ')}
+
+    bcftools index \
+        --force \
+        "\${merged_bcf}"
+
+    plink2 \
+        --bcf "\${merged_bcf}" \
+        --autosome \
+        --snps-only just-acgt \
+        --max-alleles 2 \
+        --set-all-var-ids '@:#:\$r:\$a' \
+        --new-id-max-allele-len 100 truncate \
+        --maf ${params.fst.min_maf} \
+        --geno ${params.fst.max_variant_missingness} \
+        --hwe ${params.fst.hwe_pvalue} midp \
+        --make-pgen vzs \
+        --sort-vars \
+        --threads ${task.cpus} \
+        --memory ${task.memory.mega as int} \
+        --out fst.qc \
+        > fst.prepare.log 2>&1
+
+    plink2 \
+        --pfile fst.qc vzs \
+        --indep-pairwise \
+            ${params.fst.prune_window_kb}kb \
+            ${params.fst.prune_step_variants} \
+            ${params.fst.prune_r2} \
+        --threads ${task.cpus} \
+        --memory ${task.memory.mega as int} \
+        --out fst \
+        >> fst.prepare.log 2>&1
+
+    if [[ ! -s fst.prune.in ]]
+    then
+        echo "ERROR: LD pruning retained no variants." >&2
+        exit 1
+    fi
+
+    plink2 \
+        --pfile fst.qc vzs \
+        --extract fst.prune.in \
+        --make-pgen vzs \
+        --threads ${task.cpus} \
+        --memory ${task.memory.mega as int} \
+        --out fst.pruned \
+        >> fst.prepare.log 2>&1
+
+    sample_count=\$(awk 'NR > 1 { count++ } END { print count + 0 }' fst.pruned.psam)
+    variant_count=\$(wc -l < fst.prune.in)
+
+    printf 'samples\tvariants\tmin_maf\tmax_variant_missingness\thwe_pvalue\tprune_window_kb\tprune_step_variants\tprune_r2\n' \
+        > fst.prepare.summary.tsv
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "\${sample_count}" \
+        "\${variant_count}" \
+        '${params.fst.min_maf}' \
+        '${params.fst.max_variant_missingness}' \
+        '${params.fst.hwe_pvalue}' \
+        '${params.fst.prune_window_kb}' \
+        '${params.fst.prune_step_variants}' \
+        '${params.fst.prune_r2}' \
+        >> fst.prepare.summary.tsv
+
+    rm -f \
+        "\${merged_bcf}" \
+        "\${merged_bcf}.csi"
+    """
+}
+
+
+/*
+ * Iteratively clump terminal graph communities using Hudson FST.
+ *
+ * The Python driver writes the current categorical cluster phenotype,
+ * calls PLINK 2, merges the eligible pair with the smallest FST below
+ * the configured threshold, and repeats until no eligible pair remains.
+ */
+process FST_CLUMP {
+    tag "${method} FST clumping"
+
+    cpus params.resources.fst_clump.cpus
+    memory params.resources.fst_clump.memory
+    time params.resources.fst_clump.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    module load ${params.plink2_module}
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir {
+        "${params.outdir}/clustering/${method}"
+    },
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(method),
+          path(membership)
+
+    tuple path(pgen),
+          path(pvar),
+          path(psam)
+
+    path fst_clump_script
+
+    output:
+    path "${method}.pairwise_fst.tsv.gz"
+    path "${method}.fst_merge_history.tsv"
+    path "${method}.final_membership.tsv.gz"
+    path "${method}.fst_clumping_summary.tsv"
+
+    script:
+    """
+    set -euo pipefail
+
+    python3 ${fst_clump_script} \
+        --pgen ${pgen} \
+        --pvar ${pvar} \
+        --psam ${psam} \
+        --membership ${membership} \
+        --cluster-column ${params.fst.cluster_column} \
+        --threshold ${params.fst.clump_threshold} \
+        --min-cluster-size ${params.fst.min_cluster_size} \
+        --plink2 plink2 \
+        --threads ${task.cpus} \
+        --memory-mb ${task.memory.mega as int} \
         --output-prefix ${method}
     """
 }
@@ -734,6 +935,21 @@ workflow {
 
     if (!params.python_venv) {
         error 'Set params.python_venv.'
+    }
+
+    if (params.fst.enabled && !params.plink2_module) {
+        error 'Set params.plink2_module when FST clumping is enabled.'
+    }
+
+    if (params.fst.enabled && !params.fst_clump_script) {
+        error 'Set params.fst_clump_script when FST clumping is enabled.'
+    }
+
+    if (
+        params.fst.enabled &&
+        !(params.Louvain || params.Leiden)
+    ) {
+        error 'Enable Louvain and/or Leiden when FST clumping is enabled.'
     }
 
     if (
@@ -828,6 +1044,54 @@ workflow {
         error 'params.clustering.leiden_resolution must be greater than zero.'
     }
 
+    if (
+        params.fst.enabled &&
+        (params.fst.min_maf < 0 || params.fst.min_maf > 0.5)
+    ) {
+        error 'params.fst.min_maf must be between 0 and 0.5.'
+    }
+
+    if (
+        params.fst.enabled &&
+        (params.fst.max_variant_missingness < 0 || params.fst.max_variant_missingness > 1)
+    ) {
+        error 'params.fst.max_variant_missingness must be between 0 and 1.'
+    }
+
+    if (
+        params.fst.enabled &&
+        (params.fst.hwe_pvalue <= 0 || params.fst.hwe_pvalue > 1)
+    ) {
+        error 'params.fst.hwe_pvalue must be greater than zero and no greater than one.'
+    }
+
+    if (params.fst.enabled && params.fst.prune_window_kb < 1) {
+        error 'params.fst.prune_window_kb must be at least one.'
+    }
+
+    if (params.fst.enabled && params.fst.prune_step_variants < 1) {
+        error 'params.fst.prune_step_variants must be at least one.'
+    }
+
+    if (
+        params.fst.enabled &&
+        (params.fst.prune_r2 <= 0 || params.fst.prune_r2 >= 1)
+    ) {
+        error 'params.fst.prune_r2 must be greater than zero and smaller than one.'
+    }
+
+    if (params.fst.enabled && params.fst.clump_threshold < 0) {
+        error 'params.fst.clump_threshold must be greater than or equal to zero.'
+    }
+
+    if (params.fst.enabled && params.fst.min_cluster_size < 2) {
+        error 'params.fst.min_cluster_size must be at least two.'
+    }
+
+    if (params.fst.enabled && !params.fst.cluster_column) {
+        error 'Set params.fst.cluster_column.'
+    }
+
 
     /*
      * Resolve fixed program and asset files.
@@ -846,6 +1110,13 @@ workflow {
         params.gap_file,
         checkIfExists: true
     )
+
+    if (params.fst.enabled) {
+        fstClumpScript = file(
+            params.fst_clump_script,
+            checkIfExists: true
+        )
+    }
 
 
     /*
@@ -929,6 +1200,25 @@ workflow {
 
 
     /*
+     * Prepare one reusable, LD-pruned genotype dataset for all enabled
+     * clustering methods. This branch can run concurrently with Hap-IBD.
+     */
+    if (params.fst.enabled) {
+        fstDataset = PREPARE_FST_DATA(
+            qc.vcfs
+                .toSortedList { first, second ->
+                    (first[0] as Integer) <=> (second[0] as Integer)
+                }
+                .map { chromosomeTuples ->
+                    chromosomeTuples.collect { chromosomeTuple ->
+                        chromosomeTuple[1]
+                    }
+                }
+        )
+    }
+
+
+    /*
      * Detect IBD segments using the official GRCh38 PLINK maps.
      */
     hapIBD = HAP_IBD(
@@ -987,11 +1277,19 @@ workflow {
             checkIfExists: true
         )
 
-        CLUSTER_GRAPH(
+        clusteringResults = CLUSTER_GRAPH(
             Channel.fromList(clusteringMethods),
             genomewideSummary,
             validatedSamples,
             clusteringScript
         )
+
+        if (params.fst.enabled) {
+            FST_CLUMP(
+                clusteringResults.membership,
+                fstDataset.dataset,
+                fstClumpScript
+            )
+        }
     }
 }
