@@ -21,6 +21,11 @@ At each subsequent level, every sufficiently large community from the previous
 level is independently submitted to the same clustering algorithm. Communities
 smaller than --min-cluster-size remain in the output but are not refined again.
 
+Within every proposed split, child communities smaller than
+--min-cluster-size are pooled into one residual child. The split is accepted
+only when the residual and every other child meet the minimum size. Otherwise,
+the proposed split is rejected and the parent label is carried forward.
+
 Exactly --max-levels levels are written. When no eligible parent community can
 be split at a level, its labels are carried forward unchanged. Global weighted
 modularity is reported as a diagnostic but never controls refinement or selects
@@ -536,12 +541,15 @@ def group_vertices_by_community(
 def create_stable_local_labels(
     subgraph: ig.Graph,
     local_membership: list[int],
+    residual_community: int | None = None,
 ) -> dict[int, int]:
     """
     Create deterministic local cluster labels.
 
     Communities are ordered by their lexicographically smallest sample ID.
-    This avoids relying on arbitrary internal community numbers.
+    A pooled residual community, when present, is placed last. This avoids
+    relying on arbitrary internal community numbers while keeping the residual
+    child easy to identify.
     """
 
     local_communities: dict[int, list[str]] = defaultdict(list)
@@ -554,11 +562,20 @@ def create_stable_local_labels(
         )
 
     ordered_communities = sorted(
-        local_communities,
+        (
+            community
+            for community in local_communities
+            if community != residual_community
+        ),
         key=lambda community: min(
             local_communities[community]
         ),
     )
+
+    if residual_community is not None:
+        ordered_communities.append(
+            residual_community
+        )
 
     return {
         community: index + 1
@@ -568,13 +585,93 @@ def create_stable_local_labels(
     }
 
 
+def consolidate_small_communities(
+    local_membership: list[int],
+    min_cluster_size: int,
+) -> tuple[list[int], int | None, int, bool]:
+    """
+    Pool undersized child communities into one residual child.
+
+    Returns
+    -------
+    consolidated_membership
+        Local membership after pooling undersized children. The original
+        membership is returned when the proposed split must be rejected.
+
+    residual_community
+        Identifier of the pooled residual child, or None when no pooling was
+        required or when the split was rejected.
+
+    small_communities_merged
+        Number of undersized child communities included in the residual.
+
+    reject_split
+        True when the pooled residual is still undersized or pooling leaves
+        fewer than two valid children.
+    """
+
+    community_sizes = Counter(
+        local_membership
+    )
+
+    small_communities = {
+        community
+        for community, size in community_sizes.items()
+        if size < min_cluster_size
+    }
+
+    if not small_communities:
+        return local_membership, None, 0, False
+
+    residual_size = sum(
+        community_sizes[community]
+        for community in small_communities
+    )
+
+    if residual_size < min_cluster_size:
+        return (
+            local_membership,
+            None,
+            len(small_communities),
+            True,
+        )
+
+    residual_community = max(
+        community_sizes
+    ) + 1
+
+    consolidated_membership = [
+        (
+            residual_community
+            if community in small_communities
+            else community
+        )
+        for community in local_membership
+    ]
+
+    if len(set(consolidated_membership)) < 2:
+        return (
+            local_membership,
+            None,
+            len(small_communities),
+            True,
+        )
+
+    return (
+        consolidated_membership,
+        residual_community,
+        len(small_communities),
+        False,
+    )
+
+
 def refine_membership(
     graph: ig.Graph,
     previous_membership: list[str],
     method: str,
     resolution: float,
     min_cluster_size: int,
-) -> tuple[list[str], int, int, int]:
+) -> tuple[list[str], int, int, int, int, int]:
     """
     Recursively cluster communities from the previous refinement level.
 
@@ -591,11 +688,20 @@ def refine_membership(
 
     communities_carried_forward
         Number of parent communities whose labels were unchanged.
+
+    small_child_communities_merged
+        Number of undersized child communities pooled across accepted splits.
+
+    splits_rejected_small_residual
+        Number of proposed splits rejected because pooling could not produce
+        at least two children meeting the minimum size.
     """
 
     new_membership = previous_membership.copy()
     communities_split = 0
     communities_eligible = 0
+    small_child_communities_merged = 0
+    splits_rejected_small_residual = 0
 
     grouped_vertices = group_vertices_by_community(
         previous_membership
@@ -635,9 +741,28 @@ def refine_membership(
         if len(observed_local_communities) < 2:
             continue
 
+        (
+            local_membership,
+            residual_community,
+            small_communities_merged,
+            reject_split,
+        ) = consolidate_small_communities(
+            local_membership=local_membership,
+            min_cluster_size=min_cluster_size,
+        )
+
+        if reject_split:
+            splits_rejected_small_residual += 1
+            continue
+
+        small_child_communities_merged += (
+            small_communities_merged
+        )
+
         stable_labels = create_stable_local_labels(
             subgraph,
             local_membership,
+            residual_community,
         )
 
         for local_vertex_index, local_community in enumerate(
@@ -667,6 +792,8 @@ def refine_membership(
         communities_split,
         communities_eligible,
         communities_carried_forward,
+        small_child_communities_merged,
+        splits_rejected_small_residual,
     )
 
 
@@ -791,6 +918,8 @@ def write_outputs(
         "communities_eligible",
         "communities_split",
         "communities_carried_forward",
+        "small_child_communities_merged",
+        "splits_rejected_small_residual",
         "selected",
         "stopping_reason",
     ]
@@ -812,6 +941,8 @@ def write_outputs(
             row["communities_eligible"],
             row["communities_split"],
             row["communities_carried_forward"],
+            row["small_child_communities_merged"],
+            row["splits_rejected_small_residual"],
             row["level"] == selected_level,
             row["stopping_reason"],
         )
@@ -928,6 +1059,8 @@ def main() -> None:
             ),
             "communities_split": 0,
             "communities_carried_forward": 0,
+            "small_child_communities_merged": 0,
+            "splits_rejected_small_residual": 0,
             "stopping_reason": "",
         }
     ]
@@ -945,6 +1078,8 @@ def main() -> None:
             communities_split,
             communities_eligible,
             communities_carried_forward,
+            small_child_communities_merged,
+            splits_rejected_small_residual,
         ) = refine_membership(
             graph=graph,
             previous_membership=previous_membership,
@@ -976,6 +1111,12 @@ def main() -> None:
                 "communities_eligible": communities_eligible,
                 "communities_split": communities_split,
                 "communities_carried_forward": communities_carried_forward,
+                "small_child_communities_merged": (
+                    small_child_communities_merged
+                ),
+                "splits_rejected_small_residual": (
+                    splits_rejected_small_residual
+                ),
                 "stopping_reason": (
                     "fixed_depth_completed"
                     if level == args.max_levels
@@ -992,7 +1133,10 @@ def main() -> None:
                 f"gain={modularity_gain:.6f}; "
                 f"eligible={communities_eligible:,}; "
                 f"split={communities_split:,}; "
-                f"carried_forward={communities_carried_forward:,}."
+                f"carried_forward={communities_carried_forward:,}; "
+                f"small_children_merged={small_child_communities_merged:,}; "
+                f"splits_rejected_small_residual="
+                f"{splits_rejected_small_residual:,}."
             ),
             file=sys.stderr,
         )
