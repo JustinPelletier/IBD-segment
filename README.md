@@ -262,9 +262,19 @@ With a depth of three:
 - `level_2` independently reclusters eligible level-1 communities;
 - `level_3` independently reclusters eligible level-2 communities.
 
-A community is eligible when its size is at least `min_cluster_size`.
-Ineligible, edgeless, or unsplittable communities are carried forward unchanged
-so every sample always has labels through `level_3`.
+A parent community is eligible for reclustering when its size is at least
+`min_cluster_size`. After a proposed split, child communities smaller than the
+minimum are pooled into one residual child. The split is accepted only when the
+pooled residual and every retained child contain at least the minimum number of
+samples. If the pooled residual remains undersized, or pooling leaves only one
+child, the entire proposed split is rejected and the parent label is carried
+forward unchanged.
+
+For example, proposed children of sizes 45, 30, 10, and 15 become children of
+sizes 45, 30, and 25. The two undersized children are combined into the final
+residual child. Edgeless and otherwise unsplittable parents are also carried
+forward, so every sample always has labels through `level_3` and no accepted
+split creates a cluster smaller than `min_cluster_size`.
 
 The script always materializes the requested depth. Modularity and modularity
 gain remain diagnostics only: they do not stop refinement or choose a terminal
@@ -464,7 +474,7 @@ clustering script, so samples without detected edges remain graph vertices.
 |---|---|
 | `{method}.membership.tsv.gz` | Membership at `level_0` through the requested terminal level |
 | `{method}.selected_membership.tsv.gz` | Two-column membership for the deepest requested level |
-| `{method}.diagnostics.tsv` | Cluster count, modularity, gain, eligible/split/carried communities, and terminal status by level |
+| `{method}.diagnostics.tsv` | Cluster count, modularity, gain, eligible/split/carried communities, pooled small children, rejected undersized residuals, and terminal status by level |
 | `{method}.cluster_sizes.tsv` | Cluster size and further-refinement eligibility at each level |
 
 ### FST clumping outputs
