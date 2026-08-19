@@ -266,9 +266,11 @@ A parent community is eligible for reclustering when its size is at least
 `min_cluster_size`. After a proposed split, child communities smaller than the
 minimum are pooled into one residual child. The split is accepted only when the
 pooled residual and every retained child contain at least the minimum number of
-samples. If the pooled residual remains undersized, or pooling leaves only one
-child, the entire proposed split is rejected and the parent label is carried
-forward unchanged.
+samples. If the pooled residual remains undersized but at least two valid large
+children exist, it is absorbed into the large child with which it shares the
+greatest total IBD edge weight. Ties are resolved deterministically by child
+size and sample ID. The proposed split is rejected only when fewer than two
+valid children can remain, in which case the parent label is carried forward.
 
 For example, proposed children of sizes 45, 30, 10, and 15 become children of
 sizes 45, 30, and 25. The two undersized children are combined into the final
@@ -474,7 +476,7 @@ clustering script, so samples without detected edges remain graph vertices.
 |---|---|
 | `{method}.membership.tsv.gz` | Membership at `level_0` through the requested terminal level |
 | `{method}.selected_membership.tsv.gz` | Two-column membership for the deepest requested level |
-| `{method}.diagnostics.tsv` | Cluster count, modularity, gain, eligible/split/carried communities, pooled small children, rejected undersized residuals, and terminal status by level |
+| `{method}.diagnostics.tsv` | Cluster count, modularity, gain, eligible/split/carried communities, pooled small children, absorbed undersized residuals, rejected splits, and terminal status by level |
 | `{method}.cluster_sizes.tsv` | Cluster size and further-refinement eligibility at each level |
 
 ### FST clumping outputs
