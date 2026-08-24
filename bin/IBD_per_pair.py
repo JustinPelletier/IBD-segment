@@ -33,6 +33,16 @@ The output contains one row for every pair sharing at least one detected
 IBD segment. Pairs without detected segments are not written because
 their absence from the edge list represents zero IBD sharing.
 
+Two length-based candidate edge weights are reported:
+
+    total IBD length
+    total IBD length x mean IBD segment length
+
+The second weight is equivalent to total_length^2 / segment_count and
+therefore rewards both extensive sharing and longer average segments.
+An analogous threshold-specific weight is calculated using only segments
+greater than or equal to --threshold-cm.
+
 A disk-backed SQLite database is used to avoid loading all IBD segments
 or all sample pairs into memory.
 """
@@ -242,7 +252,7 @@ def format_number(value: float) -> str:
 
 def threshold_column_names(
     threshold_cm: float,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """Return threshold-dependent output column names."""
 
     threshold_label = format_number(threshold_cm)
@@ -255,7 +265,12 @@ def threshold_column_names(
         f"total_length_of_segments_ge_{threshold_label}_cM"
     )
 
-    return count_column, length_column
+    weighted_column = (
+        "total_length_x_mean_length_of_segments_ge_"
+        f"{threshold_label}_cM_cM2"
+    )
+
+    return count_column, length_column, weighted_column
 
 
 def insert_segment_batch(
@@ -642,7 +657,11 @@ def read_chromosome_summaries(
         Total number of chromosome summary files processed.
     """
 
-    threshold_count_column, threshold_length_column = (
+    (
+        threshold_count_column,
+        threshold_length_column,
+        _,
+    ) = (
         threshold_column_names(threshold_cm)
     )
 
@@ -856,7 +875,11 @@ def write_pair_summary(
         Number of sample pairs written.
     """
 
-    threshold_count_column, threshold_length_column = (
+    (
+        threshold_count_column,
+        threshold_length_column,
+        threshold_weight_column,
+    ) = (
         threshold_column_names(threshold_cm)
     )
 
@@ -867,11 +890,13 @@ def write_pair_summary(
         "total_IBD_length_cM",
         "sum_squared_IBD_length_cM",
         "mean_IBD_length_cM",
+        "total_IBD_length_x_mean_IBD_length_cM2",
         "min_IBD_length_cM",
         "max_IBD_length_cM",
         "sd_IBD_length_cM",
         threshold_count_column,
         threshold_length_column,
+        threshold_weight_column,
     ]
 
     select_statement = """
@@ -915,6 +940,17 @@ def write_pair_summary(
             threshold_length,
         ) in connection.execute(select_statement):
             mean_length = total_length / segment_count
+            total_length_x_mean_length = total_length * mean_length
+
+            if threshold_count > 0:
+                threshold_mean_length = (
+                    threshold_length / threshold_count
+                )
+                threshold_length_x_mean_length = (
+                    threshold_length * threshold_mean_length
+                )
+            else:
+                threshold_length_x_mean_length = 0.0
 
             # Population variance across all segments detected for this pair.
             variance = (
@@ -941,11 +977,13 @@ def write_pair_summary(
                     format_number(total_length),
                     format_number(total_squared_length),
                     format_number(mean_length),
+                    format_number(total_length_x_mean_length),
                     format_number(minimum_length),
                     format_number(maximum_length),
                     format_number(standard_deviation),
                     threshold_count,
                     format_number(threshold_length),
+                    format_number(threshold_length_x_mean_length),
                 ]
             )
 
