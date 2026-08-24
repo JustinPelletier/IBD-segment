@@ -22,9 +22,10 @@ level is independently submitted to the same clustering algorithm. Communities
 smaller than --min-cluster-size remain in the output but are not refined again.
 
 Within every proposed split, child communities smaller than
---min-cluster-size are pooled into one residual child. The split is accepted
-only when the residual and every other child meet the minimum size. Otherwise,
-the proposed split is rejected and the parent label is carried forward.
+--min-cluster-size are pooled into one residual child. When the pooled residual
+still does not meet the minimum, it is absorbed into the retained large child
+with which it shares the greatest total edge weight. The split is rejected only
+when fewer than two valid children can remain.
 
 Exactly --max-levels levels are written. When no eligible parent community can
 be split at a level, its labels are carried forward unchanged. Global weighted
@@ -586,9 +587,10 @@ def create_stable_local_labels(
 
 
 def consolidate_small_communities(
+    subgraph: ig.Graph,
     local_membership: list[int],
     min_cluster_size: int,
-) -> tuple[list[int], int | None, int, bool]:
+) -> tuple[list[int], int | None, int, bool, bool]:
     """
     Pool undersized child communities into one residual child.
 
@@ -606,8 +608,11 @@ def consolidate_small_communities(
         Number of undersized child communities included in the residual.
 
     reject_split
-        True when the pooled residual is still undersized or pooling leaves
-        fewer than two valid children.
+        True when fewer than two children meeting the minimum can remain.
+
+    undersized_residual_absorbed
+        True when a pooled residual smaller than the minimum was assigned to
+        the most strongly connected retained large child.
     """
 
     community_sizes = Counter(
@@ -621,7 +626,7 @@ def consolidate_small_communities(
     }
 
     if not small_communities:
-        return local_membership, None, 0, False
+        return local_membership, None, 0, False, False
 
     residual_size = sum(
         community_sizes[community]
@@ -629,10 +634,81 @@ def consolidate_small_communities(
     )
 
     if residual_size < min_cluster_size:
+        large_communities = {
+            community
+            for community, size in community_sizes.items()
+            if size >= min_cluster_size
+        }
+
+        # Absorbing the residual when only one large child exists would leave
+        # the parent unsplit. In that case, retain the original parent label.
+        if len(large_communities) < 2:
+            return (
+                local_membership,
+                None,
+                len(small_communities),
+                True,
+                False,
+            )
+
+        connection_weights = {
+            community: 0.0
+            for community in large_communities
+        }
+
+        for edge_index, (vertex1, vertex2) in enumerate(
+            subgraph.get_edgelist()
+        ):
+            community1 = local_membership[vertex1]
+            community2 = local_membership[vertex2]
+            edge_weight = subgraph.es[edge_index]["weight"]
+
+            if (
+                community1 in small_communities
+                and community2 in large_communities
+            ):
+                connection_weights[community2] += edge_weight
+
+            elif (
+                community2 in small_communities
+                and community1 in large_communities
+            ):
+                connection_weights[community1] += edge_weight
+
+        community_minimum_sample = {}
+
+        for community in large_communities:
+            community_minimum_sample[community] = min(
+                subgraph.vs[vertex_index]["name"]
+                for vertex_index, observed_community in enumerate(
+                    local_membership
+                )
+                if observed_community == community
+            )
+
+        absorption_target = sorted(
+            large_communities,
+            key=lambda community: (
+                -connection_weights[community],
+                -community_sizes[community],
+                community_minimum_sample[community],
+            ),
+        )[0]
+
+        consolidated_membership = [
+            (
+                absorption_target
+                if community in small_communities
+                else community
+            )
+            for community in local_membership
+        ]
+
         return (
-            local_membership,
+            consolidated_membership,
             None,
             len(small_communities),
+            False,
             True,
         )
 
@@ -655,12 +731,14 @@ def consolidate_small_communities(
             None,
             len(small_communities),
             True,
+            False,
         )
 
     return (
         consolidated_membership,
         residual_community,
         len(small_communities),
+        False,
         False,
     )
 
@@ -671,7 +749,7 @@ def refine_membership(
     method: str,
     resolution: float,
     min_cluster_size: int,
-) -> tuple[list[str], int, int, int, int, int]:
+) -> tuple[list[str], int, int, int, int, int, int]:
     """
     Recursively cluster communities from the previous refinement level.
 
@@ -695,6 +773,10 @@ def refine_membership(
     splits_rejected_small_residual
         Number of proposed splits rejected because pooling could not produce
         at least two children meeting the minimum size.
+
+    undersized_residuals_absorbed
+        Number of pooled residuals below the minimum absorbed into their most
+        strongly connected retained large child.
     """
 
     new_membership = previous_membership.copy()
@@ -702,6 +784,7 @@ def refine_membership(
     communities_eligible = 0
     small_child_communities_merged = 0
     splits_rejected_small_residual = 0
+    undersized_residuals_absorbed = 0
 
     grouped_vertices = group_vertices_by_community(
         previous_membership
@@ -746,7 +829,9 @@ def refine_membership(
             residual_community,
             small_communities_merged,
             reject_split,
+            undersized_residual_absorbed,
         ) = consolidate_small_communities(
+            subgraph=subgraph,
             local_membership=local_membership,
             min_cluster_size=min_cluster_size,
         )
@@ -757,6 +842,10 @@ def refine_membership(
 
         small_child_communities_merged += (
             small_communities_merged
+        )
+
+        undersized_residuals_absorbed += int(
+            undersized_residual_absorbed
         )
 
         stable_labels = create_stable_local_labels(
@@ -794,6 +883,7 @@ def refine_membership(
         communities_carried_forward,
         small_child_communities_merged,
         splits_rejected_small_residual,
+        undersized_residuals_absorbed,
     )
 
 
@@ -920,6 +1010,7 @@ def write_outputs(
         "communities_carried_forward",
         "small_child_communities_merged",
         "splits_rejected_small_residual",
+        "undersized_residuals_absorbed",
         "selected",
         "stopping_reason",
     ]
@@ -943,6 +1034,7 @@ def write_outputs(
             row["communities_carried_forward"],
             row["small_child_communities_merged"],
             row["splits_rejected_small_residual"],
+            row["undersized_residuals_absorbed"],
             row["level"] == selected_level,
             row["stopping_reason"],
         )
@@ -1061,6 +1153,7 @@ def main() -> None:
             "communities_carried_forward": 0,
             "small_child_communities_merged": 0,
             "splits_rejected_small_residual": 0,
+            "undersized_residuals_absorbed": 0,
             "stopping_reason": "",
         }
     ]
@@ -1080,6 +1173,7 @@ def main() -> None:
             communities_carried_forward,
             small_child_communities_merged,
             splits_rejected_small_residual,
+            undersized_residuals_absorbed,
         ) = refine_membership(
             graph=graph,
             previous_membership=previous_membership,
@@ -1117,6 +1211,9 @@ def main() -> None:
                 "splits_rejected_small_residual": (
                     splits_rejected_small_residual
                 ),
+                "undersized_residuals_absorbed": (
+                    undersized_residuals_absorbed
+                ),
                 "stopping_reason": (
                     "fixed_depth_completed"
                     if level == args.max_levels
@@ -1136,7 +1233,9 @@ def main() -> None:
                 f"carried_forward={communities_carried_forward:,}; "
                 f"small_children_merged={small_child_communities_merged:,}; "
                 f"splits_rejected_small_residual="
-                f"{splits_rejected_small_residual:,}."
+                f"{splits_rejected_small_residual:,}; "
+                f"undersized_residuals_absorbed="
+                f"{undersized_residuals_absorbed:,}."
             ),
             file=sys.stderr,
         )
