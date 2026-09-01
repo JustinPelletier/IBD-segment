@@ -4,29 +4,36 @@ A Nextflow pipeline for detecting identity-by-descent (IBD) segments with
 [Hap-IBD](https://github.com/browning-lab/hap-ibd), summarizing genome-wide IBD
 sharing, identifying nested IBD-sharing communities with Louvain and Leiden,
 and consolidating genetically similar terminal communities by iterative
-genotype-based \(Fst\) clumping.
+genotype-based Hudson \(F_{ST}\) clumping. The pipeline also summarizes
+within- and between-cluster IBD sharing and produces annotated heatmaps of
+final-cluster IBD sharing and Hudson \(F_{ST}\).
 
 The pipeline is configured for SLURM and was developed for the Digital Research
 Alliance of Canada Narval cluster.
 
 ## Workflow
 
-For each configured autosome, the pipeline:
+The pipeline:
 
 1. filters variants by minor allele frequency and variant missingness;
 2. verifies that retained genotypes are phased and non-missing;
 3. verifies that sample IDs and their order match across chromosomes;
-4. detects IBD segments with Hap-IBD using a chromosome-specific genetic map;
-5. optionally removes complete segments overlapping excluded genomic regions;
-6. calculates chromosome-specific per-pair IBD summary statistics;
-7. combines chromosome summaries into an exact genome-wide pair summary;
-8. performs fixed-depth recursive Louvain and/or Leiden clustering;
-9. prepares an independent common-SNP, QC-filtered, LD-pruned genotype dataset;
-10. iteratively merges eligible terminal clusters when Hudson
-    \(F_{ST}<0.0005\), recalculating \(F_{ST}\) after every merge.
+4. optionally identifies close relatives using KING and a preliminary
+   full-cohort Hap-IBD pass;
+5. selects and applies one consistent unrelated sample set to every chromosome;
+6. detects final IBD segments with Hap-IBD using chromosome-specific maps;
+7. optionally removes complete segments overlapping excluded genomic regions;
+8. calculates chromosome-specific and exact genome-wide pair summaries;
+9. performs fixed-depth recursive Louvain and/or Leiden clustering;
+10. prepares an independent common-SNP, QC-filtered, LD-pruned genotype dataset;
+11. iteratively merges eligible terminal clusters below the configured Hudson
+    \(F_{ST}\) threshold, recalculating \(F_{ST}\) after every merge;
+12. summarizes within- and between-cluster IBD sharing after merging; and
+13. recomputes final pairwise Hudson \(F_{ST}\) and generates annotated heatmaps.
 
 The genotype-preparation branch can run concurrently with Hap-IBD and the IBD
-summary branch. Both clustering methods reuse the same pruned genotype dataset.
+summary branch. Both clustering methods reuse the same pruned genotype dataset
+and final analysis cohort.
 
 PhaseIBD and the former `MergeIBD` process are not included in version 2.
 
@@ -35,7 +42,7 @@ PhaseIBD and the former `MergeIBD` process are not included in version 2.
 ```text
 IBD-segment/
 ├── IBD_Pipeline.nf
-├── nextflow.config
+├── nextflow.example.config
 ├── Run_IBD.sh
 ├── assets/
 │   ├── chr_in_chrom_field/
@@ -49,7 +56,10 @@ IBD-segment/
     ├── hap-ibd.jar
     ├── IBD_per_pair.py
     ├── cluster_ibd_graph.py
-    └── fst_clump.py
+    ├── fst_clump.py
+    ├── relatedness_selector.py
+    ├── final_ibd_sharing.py
+    └── final_fst_heatmap.py
 ```
 
 ## Input requirements
@@ -87,12 +97,18 @@ chromosomes = 1..22
 |---|---|
 | `QC_VCF` | bcftools and tabix |
 | `VALIDATE_SAMPLES` | Standard Linux utilities |
+| `HAP_IBD_RELATEDNESS` | Java, bcftools, bedtools and Hap-IBD |
+| `KING_RELATEDNESS` | bcftools and a recent PLINK 2 |
+| `SELECT_UNRELATED_SAMPLES` | Python standard library |
+| `APPLY_UNRELATED_SAMPLES` | bcftools and tabix |
 | `HAP_IBD` | Java, bcftools, bedtools and Hap-IBD |
 | `PER_PAIR_CHROMOSOME` | Python standard library |
 | `PER_PAIR_GENOMEWIDE` | Python standard library |
 | `CLUSTER_GRAPH` | Python with `igraph` |
 | `PREPARE_FST_DATA` | bcftools and a recent PLINK 2 |
 | `FST_CLUMP` | Python standard library and a recent PLINK 2 |
+| `FINAL_IBD_SHARING` | Python with NumPy and Matplotlib |
+| `FINAL_FST_HEATMAP` | Python with NumPy and Matplotlib, and a recent PLINK 2 |
 
 Load Nextflow before launching the workflow:
 
@@ -102,8 +118,9 @@ module load nextflow
 
 ### Python environment
 
-The clustering script requires `python-igraph`. The summary and FST-clumping
-scripts otherwise use only the Python standard library.
+The clustering script requires `python-igraph`. Final plots require NumPy and
+Matplotlib. The summary, relatedness-selection, and FST-clumping scripts
+otherwise use only the Python standard library.
 
 ```bash
 module load python/3.14.2
@@ -112,12 +129,13 @@ python3 -m venv ~/virtualenvs/ibd_pipeline
 source ~/virtualenvs/ibd_pipeline/bin/activate
 
 python3 -m pip install --upgrade pip
-python3 -m pip install igraph
+python3 -m pip install igraph numpy matplotlib
 
 python3 -c "import igraph; print(igraph.__version__)"
+python3 -c "import numpy, matplotlib; print(numpy.__version__, matplotlib.__version__)"
 ```
 
-Set the environment path in `nextflow.config`:
+Set the environment path in your run configuration:
 
 ```groovy
 python_venv = "${System.getenv('HOME')}/virtualenvs/ibd_pipeline"
@@ -150,8 +168,12 @@ plink/...`.
 
 ## Configuration
 
-All user-controlled parameters are defined under `params` in
-`nextflow.config`.
+All user-controlled parameters are defined under `params`. Copy the bundled
+example before adapting paths and resources:
+
+```bash
+cp nextflow.example.config nextflow.config
+```
 
 ### Programs
 
@@ -160,6 +182,9 @@ hapibd_jar = "${projectDir}/bin/hap-ibd.jar"
 per_pair_script = "${projectDir}/bin/IBD_per_pair.py"
 clustering_script = "${projectDir}/bin/cluster_ibd_graph.py"
 fst_clump_script = "${projectDir}/bin/fst_clump.py"
+relatedness_selector_script = "${projectDir}/bin/relatedness_selector.py"
+final_ibd_script = "${projectDir}/bin/final_ibd_sharing.py"
+final_fst_heatmap_script = "${projectDir}/bin/final_fst_heatmap.py"
 ```
 
 ### Genetic maps and chromosome names
@@ -187,13 +212,44 @@ qc {
 Hap-IBD requires phased genotypes without missing alleles. The pipeline checks
 this explicitly after variant filtering.
 
+### Relatedness filtering
+
+```groovy
+relatedness {
+    mode = 'discover_apply'
+    sample_list = null
+    removal_mode = 'optimal'
+    king_cutoff = 0.0884
+    ibd_total_cm_cutoff = 1000.0
+
+    min_maf = 0.05
+    max_variant_missingness = 0.01
+    prune_window_variants = 50
+    prune_step_variants = 10
+    prune_r2 = 0.1
+    indep_order = 1
+}
+```
+
+Three modes are available:
+
+- `discover_apply` runs KING and a preliminary full-cohort Hap-IBD pass,
+  selects an unrelated subset, and applies it to all final analyses;
+- `reuse` skips discovery and uses `relatedness.sample_list`;
+- `disabled` retains the complete cohort.
+
+`removal_mode = 'optimal'` retains a large mutually unrelated subset.
+`remove_all` removes every participant belonging to at least one flagged pair.
+The Hap-IBD cutoff is based on total genome-wide sharing from the preliminary
+pass and is independent of the final clustering threshold.
+
 ### Hap-IBD parameters
 
 ```groovy
 hapibd {
     min_seed_cm = 2.0
     min_extend_cm = 1.0
-    min_output_cm = 3.0
+    min_output_cm = 2.0
     min_markers = 200
     min_mac = 2
     max_gap_bp = 1000
@@ -218,7 +274,7 @@ are normalized internally to match the VCF and Hap-IBD output.
 
 ```groovy
 summary {
-    segment_threshold_cm = 5.0
+    segment_threshold_cm = 3.0
 }
 ```
 
@@ -243,7 +299,7 @@ n_louvain = 3
 n_leiden = 3
 
 clustering {
-    weight_column = 'total_IBD_length_x_mean_IBD_length_cM2'
+    weight_column = 'total_length_of_segments_ge_3_cM'
     min_cluster_size = 20
 
     // Retained temporarily for CLI compatibility; ignored by the revised script.
@@ -302,9 +358,9 @@ Larger values represent stronger IBD sharing.
 | `number_of_IBD_segments` | Number of shared segments |
 | `mean_IBD_length_cM` | Mean segment length |
 | `max_IBD_length_cM` | Longest shared segment |
-| `number_of_segments_ge_5_cM` | Number of segments at least 5 cM long |
-| `total_length_of_segments_ge_5_cM` | Total length of segments at least 5 cM long |
-| `total_length_x_mean_length_of_segments_ge_5_cM_cM2` | Threshold-specific total length multiplied by mean length |
+| `number_of_segments_ge_{threshold}_cM` | Number of segments at or above the configured threshold |
+| `total_length_of_segments_ge_{threshold}_cM` | Total length of segments at or above the configured threshold |
+| `total_length_x_mean_length_of_segments_ge_{threshold}_cM_cM2` | Threshold-specific total length multiplied by mean length |
 
 Threshold-specific column names change with `segment_threshold_cm`.
 `sum_squared_IBD_length_cM`, `min_IBD_length_cM`, and `sd_IBD_length_cM` are
@@ -326,8 +382,8 @@ fst {
     prune_r2 = 0.1
 
     cluster_column = 'level_3'
-    clump_threshold = 0.0005
-    min_cluster_size = 20
+    clump_threshold = 0.001
+    min_cluster_size = 15
 }
 ```
 
@@ -359,12 +415,17 @@ decreasing cluster size, with the retained internal label used to break ties.
 
 ```groovy
 resources {
-    qc          { cpus = 2; memory = '8 GB';   time = '2h' }
-    hapibd      { cpus = 8; memory = '175 GB'; time = '2h' }
-    summary     { cpus = 1; memory = '16 GB';  time = '6h' }
-    clustering  { cpus = 4; memory = '86 GB';  time = '4h' }
-    fst_prepare { cpus = 8; memory = '64 GB';  time = '24h' }
-    fst_clump   { cpus = 8; memory = '32 GB';  time = '48h' }
+    qc                  { cpus = 2; memory = '4 GB';   time = '1h' }
+    relatedness_hapibd  { cpus = 8; memory = '175 GB'; time = '2h' }
+    relatedness_king    { cpus = 8; memory = '64 GB';  time = '12h' }
+    relatedness_select  { cpus = 1; memory = '16 GB';  time = '2h' }
+    hapibd              { cpus = 8; memory = '175 GB'; time = '2h' }
+    summary             { cpus = 1; memory = '12 GB';  time = '6h' }
+    clustering          { cpus = 4; memory = '64 GB';  time = '4h' }
+    fst_prepare         { cpus = 8; memory = '8 GB';   time = '2h' }
+    fst_clump           { cpus = 8; memory = '4 GB';   time = '2h' }
+    final_ibd           { cpus = 1; memory = '16 GB';  time = '6h' }
+    final_fst           { cpus = 8; memory = '32 GB';  time = '12h' }
 }
 ```
 
@@ -379,6 +440,8 @@ git clone https://github.com/JustinPelletier/IBD-segment.git
 cd IBD-segment
 
 module load nextflow
+
+cp nextflow.example.config nextflow.config
 
 nextflow run IBD_Pipeline.nf \
     -c nextflow.config \
@@ -408,7 +471,24 @@ results/
 ├── qc/
 │   ├── chr*.qc.stats.txt
 │   ├── chr*.qc.summary.tsv
-│   └── cohort.samples.txt
+│   ├── cohort.samples.txt
+│   └── unrelated/
+│       └── chr*.unrelated.summary.tsv
+├── relatedness/
+│   ├── unrelated.samples.txt
+│   ├── related_samples_removed.txt
+│   ├── related_pairs.tsv.gz
+│   ├── related_components.tsv.gz
+│   ├── relatedness_selection_summary.tsv
+│   ├── king.relatedness.summary.tsv
+│   ├── king.kin0
+│   ├── king.prune.in
+│   ├── king.relatedness.log
+│   ├── relatedness.genomewide.per_pair.tsv.gz
+│   ├── discovery_segments/
+│   │   └── chr*.relatedness.hapibd.ibd.gz
+│   └── logs/
+│       └── chr*.relatedness.hapibd.log
 ├── segments/
 │   └── chr*.hapibd.ibd.gz
 ├── logs/
@@ -438,12 +518,32 @@ results/
     │   ├── louvain.pairwise_fst.tsv.gz
     │   ├── louvain.fst_merge_history.tsv
     │   ├── louvain.final_membership.tsv.gz
-    │   └── louvain.fst_clumping_summary.tsv
+    │   ├── louvain.fst_clumping_summary.tsv
+    │   ├── ibd_sharing/
+    │   │   ├── louvain.ibd_sharing.tsv
+    │   │   ├── louvain.within_cluster_distribution.tsv
+    │   │   ├── louvain.ibd_mean_matrix.tsv
+    │   │   ├── louvain.ibd_heatmap.png
+    │   │   └── louvain.within_ibd_boxplot.png
+    │   └── final_fst/
+    │       ├── louvain.final_fst.tsv
+    │       ├── louvain.final_fst_matrix.tsv
+    │       └── louvain.final_fst_heatmap.png
     └── leiden/
         ├── leiden.pairwise_fst.tsv.gz
         ├── leiden.fst_merge_history.tsv
         ├── leiden.final_membership.tsv.gz
-        └── leiden.fst_clumping_summary.tsv
+        ├── leiden.fst_clumping_summary.tsv
+        ├── ibd_sharing/
+        │   ├── leiden.ibd_sharing.tsv
+        │   ├── leiden.within_cluster_distribution.tsv
+        │   ├── leiden.ibd_mean_matrix.tsv
+        │   ├── leiden.ibd_heatmap.png
+        │   └── leiden.within_ibd_boxplot.png
+        └── final_fst/
+            ├── leiden.final_fst.tsv
+            ├── leiden.final_fst_matrix.tsv
+            └── leiden.final_fst_heatmap.png
 ```
 
 ### Hap-IBD segments
@@ -487,6 +587,52 @@ clustering script, so samples without detected edges remain graph vertices.
 | `{method}.fst_merge_history.tsv` | Ordered merge history with pre-merge FST and cluster sizes |
 | `{method}.final_membership.tsv.gz` | Original hierarchical membership plus `pre_fst_cluster` and `final_cluster` |
 | `{method}.fst_clumping_summary.tsv` | Initial/final cluster counts, merges, threshold, and sample count |
+
+### Final IBD-sharing outputs
+
+`FINAL_IBD_SHARING` uses each method's post-clumping `final_cluster`
+assignments and streams through the genome-wide pair table once.
+
+For a pair of different clusters \(A\) and \(B\), the heatmap value is:
+
+\[
+\frac{\text{total observed IBD between }A\text{ and }B}{n_A n_B}.
+\]
+
+For the diagonal of cluster \(A\), it is:
+
+\[
+\frac{\text{total observed IBD within }A}{\binom{n_A}{2}}.
+\]
+
+Pairs absent from the genome-wide edge table are therefore included as zero
+without being materialized. This makes heatmap cells comparable across
+clusters of different sizes.
+
+| File | Description |
+|---|---|
+| `{method}.ibd_sharing.tsv` | Long-format within- and between-cluster totals, possible/detected pair counts, detected-pair fraction, all-pair mean, and detected-pair mean |
+| `{method}.ibd_mean_matrix.tsv` | Symmetric matrix of mean IBD length per possible pair, including implicit zeros |
+| `{method}.ibd_heatmap.png` | Annotated heatmap of the matrix |
+| `{method}.within_cluster_distribution.tsv` | Detected within-cluster pair count and mean, minimum, quartiles, median, and maximum IBD length |
+| `{method}.within_ibd_boxplot.png` | Distribution of total IBD length among detected within-cluster sample pairs; black dots show means and `n` labels show cluster sample sizes |
+
+The heatmap and boxplot deliberately use different denominators. Heatmap means
+include all possible pairs, including zero-sharing pairs. Boxplots describe the
+distribution conditional on a within-cluster pair having detected IBD sharing.
+
+### Final Hudson FST outputs
+
+`FINAL_FST_HEATMAP` reruns PLINK 2 once per enabled clustering method using the
+post-clumping `final_cluster` assignments. This explicitly estimates Hudson
+\(F_{ST}\) for the final merged clusters rather than extracting values from an
+earlier clumping iteration.
+
+| File | Description |
+|---|---|
+| `{method}.final_fst.tsv` | Long-format exact pairwise Hudson FST estimates |
+| `{method}.final_fst_matrix.tsv` | Symmetric final-cluster FST matrix |
+| `{method}.final_fst_heatmap.png` | Annotated `YlOrRd` heatmap with adaptive text color |
 
 
 
