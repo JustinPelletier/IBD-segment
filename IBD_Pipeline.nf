@@ -1630,7 +1630,6 @@ process FINAL_IBD_SHARING {
 
     output:
     path "${method}.ibd_sharing.tsv"
-    path "${method}.within_individual.tsv.gz"
     path "${method}.ibd_mean_matrix.tsv"
     path "${method}.ibd_heatmap.png"
     path "${method}.within_ibd_boxplot.png"
