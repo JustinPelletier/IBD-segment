@@ -726,6 +726,14 @@ If Hap-IBD is used in a publication, cite:
 > Genetics*. 2020;106(4):426–437.
 > https://doi.org/10.1016/j.ajhg.2020.02.010
 
+If IBDNe is used in a published analysis, cite the program version and the
+following article:
+
+> Browning SR, Browning BL. Accurate non-parametric estimation of recent
+> effective population size from segments of identity by descent. *The American
+> Journal of Human Genetics*. 2015;97(3):404–418.
+> https://doi.org/10.1016/j.ajhg.2015.07.012
+
 Relevant clustering and FST references:
 
 > Blondel VD, Guillaume J-L, Lambiotte R, Lefebvre E. Fast unfolding of
