@@ -140,7 +140,7 @@ def main() -> None:
     ax.set_yticks(range(len(clusters)), clusters)
     ax.set_title("Pairwise Hudson FST between final clusters")
     finite = matrix[np.isfinite(matrix)]
-    midpoint = (finite.min() + finite.max()) / 2 if finite.size else 0 # midpoint = 0.07
+    midpoint = (finite.min() + finite.max()) / 2 if finite.size else 0 
     for row in range(len(clusters)):
         for column in range(len(clusters)):
             value = matrix[row, column]
