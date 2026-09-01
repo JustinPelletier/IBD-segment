@@ -426,7 +426,7 @@ ibdne {
     mincm = 2.0
     nits = 1000
     nboots = 80
-    filtersamples = true
+    filtersamples = false
     seed = 2026
 
     parallel_clusters = 2
@@ -450,6 +450,10 @@ where \(N\) is the complete final-cluster sample count. This prevents cluster
 members with no retained within-cluster segment from being omitted from the
 IBDNe sampling denominator. Cluster-specific segment files are created in
 node-local `$SLURM_TMPDIR` and are not published.
+
+Because an explicit `npairs` value is supplied, IBDNe requires
+`filtersamples=false`. Close relatives have already been removed by the
+pipeline's upstream relatedness-selection branch.
 
 The process runs up to `parallel_clusters` IBDNe analyses concurrently within
 each clustering-method task. `java_heap_gb × parallel_clusters`, Python/Java
@@ -709,8 +713,8 @@ earlier clumping iteration.
 | `{method}.ibdne_status.tsv` | Cluster sample size, retained segment count, explicit `npairs`, completion/skip status, and failure message |
 | `Cluster_*.ne` | Effective population-size estimate and 95% bootstrap confidence interval by generation |
 | `Cluster_*.boot` | Original and bootstrap effective population-size histories |
-| `Cluster_*.pair.excl` | Close sample pairs excluded by IBDNe |
-| `Cluster_*.region.excl` | Genomic regions excluded by IBDNe |
+| `Cluster_*.pair.excl` | Optional close-pair exclusion file; it may be absent when `filtersamples=false` |
+| `Cluster_*.region.excl` | Optional excluded-region file; it may be absent when no region is excluded |
 | `Cluster_*.log` | Native IBDNe run log |
 | `Cluster_*.command.txt` | Exact IBDNe command and parameter values used for the cluster |
 | `Cluster_*.driver.log` | Standard output/error captured by the pipeline driver |
