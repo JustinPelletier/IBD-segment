@@ -1,21 +1,23 @@
 /*
- * Hap-IBD segment-detection pipeline
+ * Hap-IBD segment-detection, relatedness-filtering and clustering pipeline
  *
  * Author: Justin Pelletier
- * Version: 2.2
+ * Version: 2.4
  */
 
 nextflow.enable.dsl = 2
 
 
 /*
- * Filter variants according to MAF and variant missingness.
+ * Apply variant-level QC independently to each chromosome.
  *
- * The process also verifies that:
- * - variants remain after QC;
- * - the number of samples remains unchanged;
- * - VCF and genetic-map chromosome identifiers match;
- * - every retained genotype is phased and non-missing.
+ * The process:
+ * - filters variants by MAF and missingness;
+ * - confirms variants and samples remain;
+ * - confirms that sample count is unchanged;
+ * - confirms agreement between VCF and genetic-map chromosome labels;
+ * - confirms that every retained genotype is phased and non-missing;
+ * - writes the chromosome sample list.
  */
 process QC_VCF {
     tag "chr${chromosome}"
@@ -42,10 +44,10 @@ process QC_VCF {
 
     input:
     tuple val(chromosome),
-        path(vcf),
-        path(vcf_index),
-        path(genetic_map),
-        path(gap_file)
+          path(vcf),
+          path(vcf_index),
+          path(genetic_map),
+          path(gap_file)
 
     output:
     tuple val(chromosome),
@@ -60,19 +62,14 @@ process QC_VCF {
           emit: samples
 
     path "chr${chromosome}.qc.stats.txt",
-          emit: stats
+         emit: stats
 
     path "chr${chromosome}.qc.summary.tsv",
-          emit: summary
+         emit: summary
 
     script:
     """
     set -euo pipefail
-
-
-    # ------------------------------------------------------------------
-    # Count variants and samples before QC.
-    # ------------------------------------------------------------------
 
     variants_before_qc=\$(
         bcftools index \
@@ -90,33 +87,31 @@ process QC_VCF {
     if ! [[ "\${variants_before_qc}" =~ ^[0-9]+\$ ]]
     then
         echo "ERROR: unable to determine the number of variants before QC." >&2
-        echo "Observed value: \${variants_before_qc}" >&2
         exit 1
     fi
 
     if ! [[ "\${samples_before_qc}" =~ ^[0-9]+\$ ]]
     then
         echo "ERROR: unable to determine the number of samples before QC." >&2
-        echo "Observed value: \${samples_before_qc}" >&2
         exit 1
     fi
 
     if [[ \${variants_before_qc} -eq 0 ]]
     then
-        echo "ERROR: the chromosome ${chromosome} input VCF contains no variants." >&2
+        echo "ERROR: chromosome ${chromosome} contains no variants." >&2
         exit 1
     fi
 
     if [[ \${samples_before_qc} -eq 0 ]]
     then
-        echo "ERROR: the chromosome ${chromosome} input VCF contains no samples." >&2
+        echo "ERROR: chromosome ${chromosome} contains no samples." >&2
         exit 1
     fi
 
-
+    
     # ------------------------------------------------------------------
     # Apply variant-level QC.
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------    
 
     bcftools +fill-tags \
         ${vcf} \
@@ -134,10 +129,6 @@ process QC_VCF {
         chr${chromosome}.qc.vcf.gz
 
 
-    # ------------------------------------------------------------------
-    # Count variants and samples after QC.
-    # ------------------------------------------------------------------
-
     variants_after_qc=\$(
         bcftools index \
             -n \
@@ -154,14 +145,12 @@ process QC_VCF {
     if ! [[ "\${variants_after_qc}" =~ ^[0-9]+\$ ]]
     then
         echo "ERROR: unable to determine the number of variants after QC." >&2
-        echo "Observed value: \${variants_after_qc}" >&2
         exit 1
     fi
 
     if ! [[ "\${samples_after_qc}" =~ ^[0-9]+\$ ]]
     then
         echo "ERROR: unable to determine the number of samples after QC." >&2
-        echo "Observed value: \${samples_after_qc}" >&2
         exit 1
     fi
 
@@ -179,9 +168,99 @@ process QC_VCF {
 
     if [[ \${samples_before_qc} -ne \${samples_after_qc} ]]
     then
-        echo "ERROR: the number of samples changed during variant-level QC." >&2
+        echo "ERROR: sample count changed during variant-level QC." >&2
         echo "Before QC: \${samples_before_qc}" >&2
         echo "After QC:  \${samples_after_qc}" >&2
+        exit 1
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Write the complete chromosome sample list.
+    # ------------------------------------------------------------------
+    bcftools query \
+        -l \
+        chr${chromosome}.qc.vcf.gz \
+        > chr${chromosome}.samples.txt
+
+    if [[ ! -s chr${chromosome}.samples.txt ]]
+    then
+        echo "ERROR: chromosome ${chromosome} sample list is empty." >&2
+        exit 1
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Confirm that VCF and genetic-map chromosome labels agree.
+    # ------------------------------------------------------------------
+    vcf_chromosome=\$(
+        bcftools index \
+            -s \
+            chr${chromosome}.qc.vcf.gz |
+        awk 'NR == 1 { print \$1 }'
+    )
+
+    map_chromosome=\$(
+        awk '
+            NF > 0 && \$1 !~ /^#/ {
+                print \$1
+                exit
+            }
+        ' ${genetic_map}
+    )
+
+    if [[ -z "\${vcf_chromosome}" ]]
+    then
+        echo "ERROR: unable to determine the VCF chromosome label." >&2
+        exit 1
+    fi
+
+    if [[ -z "\${map_chromosome}" ]]
+    then
+        echo "ERROR: unable to determine the genetic-map chromosome label." >&2
+        exit 1
+    fi
+
+    if [[ "\${vcf_chromosome}" != "\${map_chromosome}" ]]
+    then
+        echo "ERROR: VCF and genetic-map chromosome labels differ." >&2
+        echo "VCF chromosome: \${vcf_chromosome}" >&2
+        echo "Map chromosome: \${map_chromosome}" >&2
+        echo "Set params.chr_in_chrom_field to match the VCF convention." >&2
+        exit 1
+    fi
+
+
+    # ------------------------------------------------------------------
+    # Confirm that all retained genotypes are phased and non-missing.
+    # ------------------------------------------------------------------
+
+    invalid_genotypes=\$(
+        bcftools query \
+            -f '[%GT\\n]' \
+            chr${chromosome}.qc.vcf.gz |
+        awk '
+            {
+                if (index(\$0, "/") > 0 || index(\$0, ".") > 0) {
+                    invalid++
+                }
+            }
+
+            END {
+                print invalid + 0
+            }
+        '
+    )
+
+    if ! [[ "\${invalid_genotypes}" =~ ^[0-9]+\$ ]]
+    then
+        echo "ERROR: unable to validate retained genotypes." >&2
+        exit 1
+    fi
+
+    if [[ \${invalid_genotypes} -ne 0 ]]
+    then
+        echo "ERROR: chromosome ${chromosome} contains \${invalid_genotypes} unphased or missing genotypes after QC." >&2
         exit 1
     fi
 
@@ -210,113 +289,21 @@ process QC_VCF {
 
 
     # ------------------------------------------------------------------
-    # Write the complete sample list.
+    # Write the QC summary.
     # ------------------------------------------------------------------
 
-    bcftools query \
-        -l \
-        chr${chromosome}.qc.vcf.gz \
-        > chr${chromosome}.samples.txt
-
-    if [[ ! -s chr${chromosome}.samples.txt ]]
-    then
-        echo "ERROR: the chromosome ${chromosome} sample list is empty." >&2
-        exit 1
-    fi
-
-
-    # ------------------------------------------------------------------
-    # Verify VCF and genetic-map chromosome identifiers.
-    # ------------------------------------------------------------------
-
-    vcf_chromosome=\$(
-        bcftools index \
-            -s \
-            chr${chromosome}.qc.vcf.gz |
-        awk 'NR == 1 { print \$1 }'
-    )
-
-    map_chromosome=\$(
-        awk '
-            NF > 0 && \$1 !~ /^#/ {
-                print \$1
-                exit
-            }
-        ' ${genetic_map}
-    )
-
-    if [[ -z "\${vcf_chromosome}" ]]
-    then
-        echo "ERROR: unable to read the chromosome identifier from the QC-filtered VCF." >&2
-        exit 1
-    fi
-
-    if [[ -z "\${map_chromosome}" ]]
-    then
-        echo "ERROR: unable to read the chromosome identifier from the genetic map." >&2
-        exit 1
-    fi
-
-    if [[ "\${vcf_chromosome}" != "\${map_chromosome}" ]]
-    then
-        echo "ERROR: chromosome identifiers do not match for chromosome ${chromosome}." >&2
-        echo "VCF chromosome: \${vcf_chromosome}" >&2
-        echo "Map chromosome: \${map_chromosome}" >&2
-        echo "Set params.chr_in_chrom_field to match the VCF convention." >&2
-        exit 1
-    fi
-
-
-    # ------------------------------------------------------------------
-    # Verify that every retained genotype is phased and non-missing.
-    #
-    # AWK scans the complete stream rather than exiting early. This
-    # prevents bcftools from receiving SIGPIPE under `set -o pipefail`.
-    # ------------------------------------------------------------------
-
-    if bcftools query \
-        -f '[%GT\\n]' \
-        chr${chromosome}.qc.vcf.gz |
-    awk '
-        index(\$0, "/") || index(\$0, ".") {
-            invalid = 1
-        }
-
-        END {
-            exit !invalid
-        }
-    '
-    then
-        echo "ERROR: chr${chromosome}.qc.vcf.gz contains an unphased or missing genotype." >&2
-        echo "Hap-IBD requires every genotype to be phased and non-missing." >&2
-        exit 1
-    fi
-
-
-    # ------------------------------------------------------------------
-    # Write the concise QC summary.
-    # ------------------------------------------------------------------
-
-    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \
-        chromosome \
-        samples \
-        variants_before_QC \
-        variants_after_QC \
-        variants_removed \
-        retention_percent \
-        min_maf \
-        max_variant_missingness \
+    printf 'chromosome\\tvariants_before_qc\\tvariants_after_qc\\tvariants_removed\\tretention_percent\\tsamples\\tmin_maf\\tmax_variant_missingness\\n' \
         > chr${chromosome}.qc.summary.tsv
 
     printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \
-        "\${vcf_chromosome}" \
-        "\${samples_after_qc}" \
+        '${chromosome}' \
         "\${variants_before_qc}" \
         "\${variants_after_qc}" \
         "\${variants_removed}" \
         "\${retention_percent}" \
-        "${params.qc.min_maf}" \
-        "${params.qc.max_variant_missingness}" \
+        "\${samples_after_qc}" \
+        '${params.qc.min_maf}' \
+        '${params.qc.max_variant_missingness}' \
         >> chr${chromosome}.qc.summary.tsv
 
 
@@ -330,15 +317,14 @@ process QC_VCF {
     """
 }
 
+
 /*
- * Confirm that sample IDs and their ordering are identical across
- * all chromosome-specific VCF files.
+ * Validate the complete-cohort chromosome sample lists.
  *
- * cohort.samples.txt is also used to include participants without
- * detected IBD edges as isolated clustering vertices.
+ * This process is called once, before relatedness discovery.
  */
 process VALIDATE_SAMPLES {
-    tag 'validate sample lists'
+    tag 'validate full-cohort sample lists'
 
     cpus 1
     memory '1 GB'
@@ -361,36 +347,719 @@ process VALIDATE_SAMPLES {
     """
     set -euo pipefail
 
+    
+
     cp \
         ${sample_files[0]} \
         cohort.samples.txt
 
     for sample_file in ${sample_files.join(' ')}
     do
-        if ! cmp -s cohort.samples.txt \${sample_file}
+        if ! cmp -s cohort.samples.txt "\${sample_file}"
         then
-            echo "ERROR: sample IDs or sample ordering differ between chromosomes." >&2
-            echo "Reference sample list: ${sample_files[0]}" >&2
-            echo "Non-matching sample list: \${sample_file}" >&2
+            echo "ERROR: full-cohort sample IDs or ordering differ between chromosomes." >&2
+            echo "Reference: ${sample_files[0]}" >&2
+            echo "Different: \${sample_file}" >&2
             exit 1
         fi
     done
+
+    if [[ ! -s cohort.samples.txt ]]
+    then
+        echo "ERROR: validated full-cohort sample list is empty." >&2
+        exit 1
+    fi
     """
 }
 
 
 /*
- * Detect IBD segments using Hap-IBD.
+ * Validate chromosome sample lists after unrelated-sample subsetting.
  *
- * Hap-IBD directly interpolates genetic positions from the supplied
- * chromosome-specific genetic map. A marker-matched PLINK map is
- * therefore not required.
+ * A separate process name is required because a DSL2 process cannot be
+ * invoked twice from the same workflow.
+ */
+process VALIDATE_ANALYSIS_SAMPLES {
+    tag 'validate unrelated-cohort sample lists'
+
+    cpus 1
+    memory '1 GB'
+    time '30m'
+
+    errorStrategy 'terminate'
+
+    publishDir "${params.outdir}/qc/unrelated",
+        pattern: 'analysis.samples.txt',
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    path sample_files
+
+    output:
+    path 'analysis.samples.txt'
+
+    script:
+    """
+    set -euo pipefail
+
+
+    cp \
+        ${sample_files[0]} \
+        analysis.samples.txt
+
+    for sample_file in ${sample_files.join(' ')}
+    do
+        if ! cmp -s analysis.samples.txt "\${sample_file}"
+        then
+            echo "ERROR: unrelated-cohort sample IDs or ordering differ between chromosomes." >&2
+            echo "Reference: ${sample_files[0]}" >&2
+            echo "Different: \${sample_file}" >&2
+            exit 1
+        fi
+    done
+
+    if [[ ! -s analysis.samples.txt ]]
+    then
+        echo "ERROR: validated unrelated-cohort sample list is empty." >&2
+        exit 1
+    fi
+    """
+}
+
+
+/*
+ * Preliminary full-cohort Hap-IBD analysis for relatedness discovery.
  *
- * If excluded-region filtering is enabled, complete IBD segments
- * overlapping at least one listed interval are removed.
+ * This process uses params.relatedness_hapibd. The final unrelated-cohort
+ * Hap-IBD process will separately use params.hapibd.
+ */
+process HAP_IBD_RELATEDNESS {
+    tag "relatedness chr${chromosome}"
+
+    cpus params.resources.relatedness_hapibd.cpus
+    memory params.resources.relatedness_hapibd.memory
+    time params.resources.relatedness_hapibd.time
+
+    errorStrategy 'retry'
+    maxRetries 1
+
+    beforeScript """
+    module load java/25.36
+    module load bcftools
+    module load bedtools
+    """
+
+    publishDir "${params.outdir}/relatedness/discovery_segments",
+        pattern: '*.relatedness.hapibd.ibd.gz',
+        mode: 'copy',
+        overwrite: true
+
+    publishDir "${params.outdir}/relatedness/logs",
+        pattern: '*.relatedness.hapibd.log',
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(chromosome),
+          path(vcf),
+          path(vcf_index),
+          path(genetic_map),
+          path(gap_file)
+
+    path hapibd_jar
+
+    output:
+    tuple val(chromosome),
+          path("chr${chromosome}.relatedness.hapibd.ibd.gz"),
+          emit: segments
+
+    path "chr${chromosome}.relatedness.hapibd.log",
+         emit: logs
+
+    script:
+    def javaGb = Math.max(
+        1,
+        (task.memory.giga * 0.90) as int
+    )
+
+    def filterGaps = params.remove_gaps \
+        ? """
+          vcf_chromosome=\$(
+              bcftools index \
+                  -s \
+                  ${vcf} |
+              awk 'NR == 1 { print \$1 }'
+          )
+
+          if [[ -z "\${vcf_chromosome}" ]]
+          then
+              echo "ERROR: unable to determine chromosome from ${vcf}." >&2
+              exit 1
+          fi
+
+          normalized_chromosome=\$(
+              echo "\${vcf_chromosome}" |
+              sed 's/^chr//'
+          )
+
+          awk \
+              -v target="\${vcf_chromosome}" \
+              -v normalized="\${normalized_chromosome}" \
+              '
+              BEGIN {
+                  OFS = "\\t"
+              }
+
+              {
+                  bed_chromosome = \$1
+                  sub(/^chr/, "", bed_chromosome)
+
+                  if (bed_chromosome == normalized) {
+                      print target, \$2, \$3, \$4
+                  }
+              }
+              ' ${gap_file} \
+              > chr${chromosome}.relatedness.gaps.bed
+
+          if [[ -s chr${chromosome}.relatedness.gaps.bed ]]
+          then
+              awk '
+                  BEGIN {
+                      OFS = "\\t"
+                  }
+
+                  {
+                      bed_start = \$6 - 1
+
+                      if (bed_start < 0) {
+                          bed_start = 0
+                      }
+
+                      print \$5, bed_start, \$7, \$0
+                  }
+              ' chr${chromosome}.relatedness.raw.ibd |
+              bedtools intersect \
+                  -v \
+                  -a - \
+                  -b chr${chromosome}.relatedness.gaps.bed |
+              cut -f4- \
+                  > chr${chromosome}.relatedness.filtered.ibd
+          else
+              cp \
+                  chr${chromosome}.relatedness.raw.ibd \
+                  chr${chromosome}.relatedness.filtered.ibd
+          fi
+          """ \
+        : """
+          cp \
+              chr${chromosome}.relatedness.raw.ibd \
+              chr${chromosome}.relatedness.filtered.ibd
+          """
+
+    """
+    set -euo pipefail
+
+    java \
+        -Xmx${javaGb}g \
+        -jar ${hapibd_jar} \
+        gt=${vcf} \
+        map=${genetic_map} \
+        out=chr${chromosome}.relatedness.raw \
+        min-seed=${params.relatedness_hapibd.min_seed_cm} \
+        min-extend=${params.relatedness_hapibd.min_extend_cm} \
+        min-output=${params.relatedness_hapibd.min_output_cm} \
+        min-markers=${params.relatedness_hapibd.min_markers} \
+        min-mac=${params.relatedness_hapibd.min_mac} \
+        max-gap=${params.relatedness_hapibd.max_gap_bp} \
+        nthreads=${task.cpus}
+
+    mv \
+        chr${chromosome}.relatedness.raw.log \
+        chr${chromosome}.relatedness.hapibd.log
+
+    gunzip -c \
+        chr${chromosome}.relatedness.raw.ibd.gz \
+        > chr${chromosome}.relatedness.raw.ibd
+
+    ${filterGaps}
+
+    bgzip -c \
+        chr${chromosome}.relatedness.filtered.ibd \
+        > chr${chromosome}.relatedness.hapibd.ibd.gz
+    """
+}
+
+
+/*
+ * Calculate chromosome-level pair summaries for the preliminary run.
+ */
+process PER_PAIR_CHROMOSOME_RELATEDNESS {
+    tag "relatedness chr${chromosome}"
+
+    cpus params.resources.summary.cpus
+    memory params.resources.summary.memory
+    time params.resources.summary.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    source ${params.python_venv}/bin/activate
+    """
+
+    input:
+    tuple val(chromosome),
+          path(ibd_file)
+
+    path summary_script
+
+    output:
+    tuple val(chromosome),
+          path("chr${chromosome}.relatedness.per_pair.tsv.gz")
+
+    script:
+    """
+    set -euo pipefail
+
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
+    python3 ${summary_script} \
+        --input ${ibd_file} \
+        --output chr${chromosome}.relatedness.per_pair.tsv.gz \
+        --threshold-cm ${params.relatedness_summary.segment_threshold_cm} \
+        --temporary-directory "\${SLURM_TMPDIR}"
+    """
+}
+
+
+/*
+ * Aggregate preliminary chromosome summaries genome-wide.
+ *
+ * The selector uses total_IBD_length_cM from this table.
+ */
+process PER_PAIR_GENOMEWIDE_RELATEDNESS {
+    tag 'relatedness genome-wide summary'
+
+    cpus params.resources.summary.cpus
+    memory params.resources.summary.memory
+    time params.resources.summary.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir "${params.outdir}/relatedness",
+        pattern: 'relatedness.genomewide.per_pair.tsv.gz',
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    path chromosome_summaries
+    path summary_script
+
+    output:
+    path 'relatedness.genomewide.per_pair.tsv.gz'
+
+    script:
+    """
+    set -euo pipefail
+
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
+    python3 ${summary_script} \
+        --input ${chromosome_summaries.join(' ')} \
+        --output relatedness.genomewide.per_pair.tsv.gz \
+        --threshold-cm ${params.relatedness_summary.segment_threshold_cm} \
+        --aggregate-summaries \
+        --temporary-directory "\${SLURM_TMPDIR}"
+    """
+}
+
+
+/*
+ * Prepare common LD-pruned SNPs and calculate KING kinship coefficients.
+ */
+process KING_RELATEDNESS {
+    tag 'KING relatedness discovery'
+
+    cpus params.resources.relatedness_king.cpus
+    memory params.resources.relatedness_king.memory
+    time params.resources.relatedness_king.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load bcftools
+    module load ${params.plink2_module}
+    """
+
+    publishDir "${params.outdir}/relatedness",
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    path qc_vcfs
+
+    output:
+    path 'king.kin0',
+         emit: pairs
+
+    path 'king.prune.in',
+         emit: variants
+
+    path 'king.relatedness.summary.tsv',
+         emit: summary
+
+    path 'king.relatedness.log',
+         emit: log
+
+    script:
+    """
+    set -euo pipefail
+
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
+    merged_bcf="\${SLURM_TMPDIR}/king.autosomes.bcf"
+
+    bcftools concat \
+        --output-type b \
+        --output "\${merged_bcf}" \
+        ${qc_vcfs.join(' ')}
+
+    bcftools index \
+        --force \
+        "\${merged_bcf}"
+
+    plink2 \
+        --bcf "\${merged_bcf}" \
+        --autosome \
+        --snps-only just-acgt \
+        --max-alleles 2 \
+        --set-all-var-ids '@:#:\$r:\$a' \
+        --new-id-max-allele-len 100 truncate \
+        --maf ${params.relatedness.min_maf} \
+        --geno ${params.relatedness.max_variant_missingness} \
+        --make-pgen vzs \
+        --sort-vars \
+        --threads ${task.cpus} \
+        --memory ${task.memory.mega as int} \
+        --out king.qc \
+        > king.relatedness.log 2>&1
+
+    plink2 \
+        --pfile king.qc vzs \
+        --indep-pairwise \
+            ${params.relatedness.prune_window_variants} \
+            ${params.relatedness.prune_step_variants} \
+            ${params.relatedness.prune_r2} \
+        --indep-order ${params.relatedness.indep_order} \
+        --threads ${task.cpus} \
+        --memory ${task.memory.mega as int} \
+        --out king \
+        >> king.relatedness.log 2>&1
+
+    if [[ ! -s king.prune.in ]]
+    then
+        echo "ERROR: KING LD pruning retained no variants." >&2
+        exit 1
+    fi
+
+    plink2 \
+        --pfile king.qc vzs \
+        --extract king.prune.in \
+        --make-king-table \
+        --king-table-filter ${params.relatedness.king_cutoff} \
+        --threads ${task.cpus} \
+        --memory ${task.memory.mega as int} \
+        --out king \
+        >> king.relatedness.log 2>&1
+
+    if [[ ! -f king.kin0 ]]
+    then
+        echo "ERROR: PLINK 2 did not create king.kin0." >&2
+        exit 1
+    fi
+
+    sample_count=\$(
+        awk '
+            NR > 1 {
+                count++
+            }
+
+            END {
+                print count + 0
+            }
+        ' king.qc.psam
+    )
+
+    variant_count=\$(
+        wc -l \
+            < king.prune.in
+    )
+
+    printf 'samples\\tvariants\\tmin_maf\\tmax_variant_missingness\\tking_cutoff\\tprune_window_variants\\tprune_step_variants\\tprune_r2\\tindep_order\\n' \
+        > king.relatedness.summary.tsv
+
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \
+        "\${sample_count}" \
+        "\${variant_count}" \
+        '${params.relatedness.min_maf}' \
+        '${params.relatedness.max_variant_missingness}' \
+        '${params.relatedness.king_cutoff}' \
+        '${params.relatedness.prune_window_variants}' \
+        '${params.relatedness.prune_step_variants}' \
+        '${params.relatedness.prune_r2}' \
+        '${params.relatedness.indep_order}' \
+        >> king.relatedness.summary.tsv
+
+    rm -f \
+        "\${merged_bcf}" \
+        "\${merged_bcf}.csi"
+    """
+}
+
+
+/*
+ * Combine KING and Hap-IBD related pairs and select the final unrelated set.
+ *
+ * removal_mode:
+ * - optimal: retain a maximum/practical maximal mutually unrelated subset;
+ * - remove_all: exclude every participant belonging to a flagged pair.
+ */
+process SELECT_UNRELATED_SAMPLES {
+    tag 'select unrelated samples'
+
+    cpus params.resources.relatedness_select.cpus
+    memory params.resources.relatedness_select.memory
+    time params.resources.relatedness_select.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir "${params.outdir}/relatedness",
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    path cohort_samples
+    path king_pairs
+    path genomewide_summary
+    path selector_script
+
+    output:
+    path 'unrelated.samples.txt',
+         emit: unrelated
+
+    path 'related_samples_removed.txt',
+         emit: removed
+
+    path 'related_pairs.tsv.gz',
+         emit: pairs
+
+    path 'related_components.tsv.gz',
+         emit: components
+
+    path 'relatedness_selection_summary.tsv',
+         emit: summary
+
+    script:
+    """
+    set -euo pipefail
+
+    python3 ${selector_script} \
+        --samples ${cohort_samples} \
+        --king ${king_pairs} \
+        --ibd ${genomewide_summary} \
+        --king-cutoff ${params.relatedness.king_cutoff} \
+        --ibd-total-cm-cutoff ${params.relatedness.ibd_total_cm_cutoff} \
+        --removal-mode ${params.relatedness.removal_mode} \
+        --output-prefix relatedness
+
+    mv \
+        relatedness.unrelated.samples.txt \
+        unrelated.samples.txt
+
+    mv \
+        relatedness.related_samples_removed.txt \
+        related_samples_removed.txt
+
+    mv \
+        relatedness.related_pairs.tsv.gz \
+        related_pairs.tsv.gz
+
+    mv \
+        relatedness.related_components.tsv.gz \
+        related_components.tsv.gz
+
+    mv \
+        relatedness.selection_summary.tsv \
+        relatedness_selection_summary.tsv
+    """
+}
+
+
+/*
+ * Subset each QC VCF to the selected unrelated cohort.
+ *
+ * This occurs before the final Hap-IBD and FST branches.
+ */
+process APPLY_UNRELATED_SAMPLES {
+    tag "unrelated chr${chromosome}"
+
+    cpus params.resources.qc.cpus
+    memory params.resources.qc.memory
+    time params.resources.qc.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load bcftools
+    """
+
+    publishDir "${params.outdir}/qc/unrelated",
+        pattern: '*.unrelated.summary.tsv',
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(chromosome),
+          path(vcf),
+          path(vcf_index),
+          path(genetic_map),
+          path(gap_file)
+
+    path unrelated_samples
+
+    output:
+    tuple val(chromosome),
+          path("chr${chromosome}.unrelated.vcf.gz"),
+          path("chr${chromosome}.unrelated.vcf.gz.tbi"),
+          path(genetic_map),
+          path(gap_file),
+          emit: vcfs
+
+    tuple val(chromosome),
+          path("chr${chromosome}.samples.txt"),
+          emit: samples
+
+    path "chr${chromosome}.unrelated.summary.tsv",
+         emit: summary
+
+    script:
+    """
+    set -euo pipefail
+
+    if [[ ! -s ${unrelated_samples} ]]
+    then
+        echo "ERROR: the unrelated sample list is empty." >&2
+        exit 1
+    fi
+
+    duplicate_count=\$(
+        sort ${unrelated_samples} |
+        uniq -d |
+        wc -l
+    )
+
+    if [[ \${duplicate_count} -ne 0 ]]
+    then
+        echo "ERROR: the unrelated sample list contains duplicate IDs." >&2
+        exit 1
+    fi
+
+    bcftools query \
+        -l \
+        ${vcf} \
+        > input.samples.txt
+
+    missing_count=\$(
+        comm \
+            -23 \
+            <(sort ${unrelated_samples}) \
+            <(sort input.samples.txt) |
+        wc -l
+    )
+
+    if [[ \${missing_count} -ne 0 ]]
+    then
+        echo "ERROR: \${missing_count} unrelated-list IDs are absent from chromosome ${chromosome}." >&2
+
+        comm \
+            -23 \
+            <(sort ${unrelated_samples}) \
+            <(sort input.samples.txt) >&2
+
+        exit 1
+    fi
+
+    bcftools view \
+        --samples-file ${unrelated_samples} \
+        --output-type z \
+        --output chr${chromosome}.unrelated.vcf.gz \
+        ${vcf}
+
+    tabix \
+        -f \
+        -p vcf \
+        chr${chromosome}.unrelated.vcf.gz
+
+    bcftools query \
+        -l \
+        chr${chromosome}.unrelated.vcf.gz \
+        > chr${chromosome}.samples.txt
+
+    input_count=\$(wc -l < input.samples.txt)
+    requested_count=\$(wc -l < ${unrelated_samples})
+    retained_count=\$(wc -l < chr${chromosome}.samples.txt)
+
+    if [[ \${retained_count} -ne \${requested_count} ]]
+    then
+        echo "ERROR: retained sample count does not match the unrelated list." >&2
+        exit 1
+    fi
+
+    printf 'chromosome\\tinput_samples\\tretained_samples\\tremoved_samples\\n' \
+        > chr${chromosome}.unrelated.summary.tsv
+
+    printf '%s\\t%s\\t%s\\t%s\\n' \
+        '${chromosome}' \
+        "\${input_count}" \
+        "\${retained_count}" \
+        "\$((input_count - retained_count))" \
+        >> chr${chromosome}.unrelated.summary.tsv
+    """
+}
+
+
+
+/*
+ * Final Hap-IBD analysis on the unrelated cohort.
+ *
+ * This process uses params.hapibd, independently of the preliminary
+ * relatedness_hapibd parameters.
  */
 process HAP_IBD {
-    tag "chr${chromosome}"
+    tag "final chr${chromosome}"
 
     cpus params.resources.hapibd.cpus
     memory params.resources.hapibd.memory
@@ -430,7 +1099,7 @@ process HAP_IBD {
           emit: segments
 
     path "chr${chromosome}.hapibd.log",
-          emit: logs
+         emit: logs
 
     script:
     def javaGb = Math.max(
@@ -441,13 +1110,15 @@ process HAP_IBD {
     def filterGaps = params.remove_gaps \
         ? """
           vcf_chromosome=\$(
-              bcftools index -s ${vcf} |
+              bcftools index \
+                  -s \
+                  ${vcf} |
               awk 'NR == 1 { print \$1 }'
           )
 
           if [[ -z "\${vcf_chromosome}" ]]
           then
-              echo "ERROR: unable to determine the chromosome name from ${vcf}." >&2
+              echo "ERROR: unable to determine chromosome from ${vcf}." >&2
               exit 1
           fi
 
@@ -456,10 +1127,6 @@ process HAP_IBD {
               sed 's/^chr//'
           )
 
-          # Select the excluded regions for the current chromosome.
-          #
-          # The chromosome label is rewritten to match the VCF and
-          # Hap-IBD output, allowing either "1" or "chr1" conventions.
           awk \
               -v target="\${vcf_chromosome}" \
               -v normalized="\${normalized_chromosome}" \
@@ -477,18 +1144,10 @@ process HAP_IBD {
                   }
               }
               ' ${gap_file} \
-              > chr${chromosome}.normalized.gaps.bed
+              > chr${chromosome}.gaps.bed
 
-          if [[ ! -s chr${chromosome}.normalized.gaps.bed ]]
+          if [[ -s chr${chromosome}.gaps.bed ]]
           then
-              echo "WARNING: no excluded regions were found for chromosome \${vcf_chromosome}." >&2
-
-              cp \
-                  chr${chromosome}.raw.ibd \
-                  chr${chromosome}.filtered.ibd
-          else
-              # Hap-IBD reports one-based inclusive positions.
-              # BED uses zero-based, half-open coordinates.
               awk '
                   BEGIN {
                       OFS = "\\t"
@@ -504,12 +1163,16 @@ process HAP_IBD {
                       print \$5, bed_start, \$7, \$0
                   }
               ' chr${chromosome}.raw.ibd |
-                  bedtools intersect \
-                      -v \
-                      -a - \
-                      -b chr${chromosome}.normalized.gaps.bed |
-                  cut -f4- \
+              bedtools intersect \
+                  -v \
+                  -a - \
+                  -b chr${chromosome}.gaps.bed |
+              cut -f4- \
                   > chr${chromosome}.filtered.ibd
+          else
+              cp \
+                  chr${chromosome}.raw.ibd \
+                  chr${chromosome}.filtered.ibd
           fi
           """ \
         : """
@@ -552,12 +1215,11 @@ process HAP_IBD {
 }
 
 
-
 /*
- * Generate pair-level IBD summary statistics for each chromosome.
+ * Final chromosome-level pair summaries.
  */
 process PER_PAIR_CHROMOSOME {
-    tag "chr${chromosome}"
+    tag "final chr${chromosome}"
 
     cpus params.resources.summary.cpus
     memory params.resources.summary.memory
@@ -605,13 +1267,10 @@ process PER_PAIR_CHROMOSOME {
 
 
 /*
- * Combine chromosome-specific pair summaries into a genome-wide
- * pair-level summary.
- *
- * This avoids rereading all raw Hap-IBD segment files.
+ * Final genome-wide pair summary used for graph clustering.
  */
 process PER_PAIR_GENOMEWIDE {
-    tag 'genome-wide summary'
+    tag 'final genome-wide summary'
 
     cpus params.resources.summary.cpus
     memory params.resources.summary.memory
@@ -657,8 +1316,8 @@ process PER_PAIR_GENOMEWIDE {
 
 
 /*
- * Apply recursive Louvain or Leiden clustering to the genome-wide
- * weighted IBD-sharing graph.
+ * Apply recursive Louvain or Leiden clustering to the final unrelated-cohort
+ * weighted IBD graph.
  */
 process CLUSTER_GRAPH {
     tag "${method} clustering"
@@ -716,17 +1375,12 @@ process CLUSTER_GRAPH {
 
 
 /*
- * Prepare an autosomal, common, high-quality, LD-pruned PLINK 2
- * dataset for genotype-based FST estimation.
+ * Prepare a common, autosomal, biallelic and LD-pruned PGEN dataset for FST.
  *
- * The chromosome VCFs have already passed the Hap-IBD QC step. This
- * process applies a separate, configurable FST-specific filter because
- * FST estimation and graph construction have different requirements.
- * The concatenated BCF is written to node-local storage and removed at
- * the end of the task.
+ * Input VCFs have already been restricted to the unrelated cohort.
  */
 process PREPARE_FST_DATA {
-    tag 'prepare FST genotype data'
+    tag 'prepare unrelated-cohort FST data'
 
     cpus params.resources.fst_prepare.cpus
     memory params.resources.fst_prepare.memory
@@ -812,7 +1466,7 @@ process PREPARE_FST_DATA {
 
     if [[ ! -s fst.prune.in ]]
     then
-        echo "ERROR: LD pruning retained no variants." >&2
+        echo "ERROR: FST LD pruning retained no variants." >&2
         exit 1
     fi
 
@@ -825,13 +1479,45 @@ process PREPARE_FST_DATA {
         --out fst.pruned \
         >> fst.prepare.log 2>&1
 
-    sample_count=\$(awk 'NR > 1 { count++ } END { print count + 0 }' fst.pruned.psam)
-    variant_count=\$(wc -l < fst.prune.in)
+    if [[ ! -s fst.pruned.pgen ]]
+    then
+        echo "ERROR: PLINK 2 did not create fst.pruned.pgen." >&2
+        exit 1
+    fi
 
-    printf 'samples\tvariants\tmin_maf\tmax_variant_missingness\thwe_pvalue\tprune_window_kb\tprune_step_variants\tprune_r2\n' \
+    if [[ ! -s fst.pruned.pvar.zst ]]
+    then
+        echo "ERROR: PLINK 2 did not create fst.pruned.pvar.zst." >&2
+        exit 1
+    fi
+
+    if [[ ! -s fst.pruned.psam ]]
+    then
+        echo "ERROR: PLINK 2 did not create fst.pruned.psam." >&2
+        exit 1
+    fi
+
+    sample_count=\$(
+        awk '
+            NR > 1 {
+                count++
+            }
+
+            END {
+                print count + 0
+            }
+        ' fst.pruned.psam
+    )
+
+    variant_count=\$(
+        wc -l \
+            < fst.prune.in
+    )
+
+    printf 'samples\\tvariants\\tmin_maf\\tmax_variant_missingness\\thwe_pvalue\\tprune_window_kb\\tprune_step_variants\\tprune_r2\\n' \
         > fst.prepare.summary.tsv
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \
         "\${sample_count}" \
         "\${variant_count}" \
         '${params.fst.min_maf}' \
@@ -850,11 +1536,7 @@ process PREPARE_FST_DATA {
 
 
 /*
- * Iteratively clump terminal graph communities using Hudson FST.
- *
- * The Python driver writes the current categorical cluster phenotype,
- * calls PLINK 2, merges the eligible pair with the smallest FST below
- * the configured threshold, and repeats until no eligible pair remains.
+ * Iteratively merge terminal clusters using Hudson FST.
  */
 process FST_CLUMP {
     tag "${method} FST clumping"
@@ -890,7 +1572,9 @@ process FST_CLUMP {
     output:
     path "${method}.pairwise_fst.tsv.gz"
     path "${method}.fst_merge_history.tsv"
-    path "${method}.final_membership.tsv.gz"
+    tuple val(method),
+          path("${method}.final_membership.tsv.gz"),
+          emit: final_membership
     path "${method}.fst_clumping_summary.tsv"
 
     script:
@@ -913,16 +1597,136 @@ process FST_CLUMP {
 }
 
 
+/*
+ * Summarize within- and between-cluster IBD sharing after FST merging.
+ * Undetected pairs are included as zero through analytical denominators.
+ */
+process FINAL_IBD_SHARING {
+    tag "${method} final IBD sharing"
+
+    cpus params.resources.final_ibd.cpus
+    memory params.resources.final_ibd.memory
+    time params.resources.final_ibd.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir {
+        "${params.outdir}/clustering/${method}/ibd_sharing"
+    },
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(method),
+          path(membership)
+
+    path pair_summary
+    path analysis_script
+
+    output:
+    path "${method}.ibd_sharing.tsv"
+    path "${method}.within_individual.tsv.gz"
+    path "${method}.ibd_mean_matrix.tsv"
+    path "${method}.ibd_heatmap.png"
+    path "${method}.within_ibd_boxplot.png"
+
+    script:
+    """
+    set -euo pipefail
+
+    python3 ${analysis_script} \
+        --edges ${pair_summary} \
+        --membership ${membership} \
+        --weight-column ${params.clustering.weight_column} \
+        --output-prefix ${method}
+    """
+}
+
+
+/*
+ * Recompute Hudson FST from the post-merging assignments and plot the
+ * final pairwise matrix.
+ */
+process FINAL_FST_HEATMAP {
+    tag "${method} final FST heatmap"
+
+    cpus params.resources.final_fst.cpus
+    memory params.resources.final_fst.memory
+    time params.resources.final_fst.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    module load ${params.plink2_module}
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir {
+        "${params.outdir}/clustering/${method}/final_fst"
+    },
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(method),
+          path(membership)
+
+    tuple path(pgen),
+          path(pvar),
+          path(psam)
+
+    path heatmap_script
+
+    output:
+    path "${method}.final_fst.tsv"
+    path "${method}.final_fst_matrix.tsv"
+    path "${method}.final_fst_heatmap.png"
+
+    script:
+    """
+    set -euo pipefail
+
+    python3 ${heatmap_script} \
+        --pgen ${pgen} \
+        --pvar ${pvar} \
+        --psam ${psam} \
+        --membership ${membership} \
+        --plink2 plink2 \
+        --threads ${task.cpus} \
+        --memory-mb ${task.memory.mega as int} \
+        --output-prefix ${method}
+    """
+}
+
+
+
+
+
+
+
 workflow {
     /*
-     * Validate configuration parameters.
+     * ---------------------------------------------------------------
+     * General configuration validation
+     * ---------------------------------------------------------------
      */
+
     if (!params.input_pattern) {
         error 'Set params.input_pattern.'
     }
 
     if (!params.input_index_pattern) {
         error 'Set params.input_index_pattern.'
+    }
+
+    if (!(params.chromosomes as List)) {
+        error 'params.chromosomes must contain at least one chromosome.'
     }
 
     if (!params.hapibd_jar) {
@@ -937,39 +1741,69 @@ workflow {
         error 'Set params.python_venv.'
     }
 
-    if (params.fst.enabled && !params.plink2_module) {
-        error 'Set params.plink2_module when FST clumping is enabled.'
-    }
-
-    if (params.fst.enabled && !params.fst_clump_script) {
-        error 'Set params.fst_clump_script when FST clumping is enabled.'
-    }
-
-    if (
-        params.fst.enabled &&
-        !(params.Louvain || params.Leiden)
-    ) {
-        error 'Enable Louvain and/or Leiden when FST clumping is enabled.'
-    }
-
-    if (
-        (params.Louvain || params.Leiden) &&
-        !params.clustering_script
-    ) {
-        error 'Set params.clustering_script when clustering is enabled.'
-    }
-
     if (!params.gap_file) {
         error 'Set params.gap_file.'
-    }
-
-    if (!(params.chromosomes as List)) {
-        error 'params.chromosomes must contain at least one chromosome.'
     }
 
     if (!(params.chr_in_chrom_field instanceof Boolean)) {
         error 'params.chr_in_chrom_field must be true or false.'
     }
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Relatedness mode
+     * ---------------------------------------------------------------
+     *
+     * discover_apply:
+     *   Run KING and preliminary full-cohort Hap-IBD, generate the
+     *   unrelated list, and then run the final analyses.
+     *
+     * reuse:
+     *   Skip relatedness discovery and use an existing unrelated list.
+     *
+     * disabled:
+     *   Run final analyses on the complete cohort.
+     */
+
+    def relatednessMode = params.relatedness.mode as String
+
+    if (!(relatednessMode in ['discover_apply', 'reuse', 'disabled'])) {
+        error """
+        params.relatedness.mode must be one of:
+        - discover_apply
+        - reuse
+        - disabled
+        """.stripIndent().trim()
+    }
+
+    if (
+        relatednessMode == 'discover_apply' &&
+        !params.relatedness_selector_script
+    ) {
+        error 'Set params.relatedness_selector_script for discover_apply mode.'
+    }
+
+    if (
+        relatednessMode == 'reuse' &&
+        !params.relatedness.sample_list
+    ) {
+        error 'Set params.relatedness.sample_list for reuse mode.'
+    }
+
+    if (
+        (relatednessMode == 'discover_apply' || params.fst.enabled) &&
+        !params.plink2_module
+    ) {
+        error 'Set params.plink2_module when relatedness discovery or FST is enabled.'
+    }
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Variant-QC validation
+     * ---------------------------------------------------------------
+     */
 
     if (
         params.qc.min_maf < 0 ||
@@ -985,6 +1819,105 @@ workflow {
         error 'params.qc.max_variant_missingness must be between 0 and 1.'
     }
 
+
+    /*
+     * ---------------------------------------------------------------
+     * Relatedness-discovery validation
+     * ---------------------------------------------------------------
+     */
+
+    if (relatednessMode == 'discover_apply') {
+        if (!(params.relatedness.removal_mode in ['optimal', 'remove_all'])) {
+            error "params.relatedness.removal_mode must be 'optimal' or 'remove_all'."
+        }
+
+        if (
+            params.relatedness.king_cutoff <= 0 ||
+            params.relatedness.king_cutoff >= 0.5
+        ) {
+            error 'params.relatedness.king_cutoff must be greater than 0 and smaller than 0.5.'
+        }
+
+        if (params.relatedness.ibd_total_cm_cutoff <= 0) {
+            error 'params.relatedness.ibd_total_cm_cutoff must be greater than zero.'
+        }
+
+        if (
+            params.relatedness.min_maf < 0 ||
+            params.relatedness.min_maf > 0.5
+        ) {
+            error 'params.relatedness.min_maf must be between 0 and 0.5.'
+        }
+
+        if (
+            params.relatedness.max_variant_missingness < 0 ||
+            params.relatedness.max_variant_missingness > 1
+        ) {
+            error 'params.relatedness.max_variant_missingness must be between 0 and 1.'
+        }
+
+        if (params.relatedness.prune_window_variants < 2) {
+            error 'params.relatedness.prune_window_variants must be at least two.'
+        }
+
+        if (params.relatedness.prune_step_variants < 1) {
+            error 'params.relatedness.prune_step_variants must be at least one.'
+        }
+
+        if (
+            params.relatedness.prune_r2 <= 0 ||
+            params.relatedness.prune_r2 >= 1
+        ) {
+            error 'params.relatedness.prune_r2 must be greater than 0 and smaller than 1.'
+        }
+
+        if (!(params.relatedness.indep_order in [1, 2])) {
+            error 'params.relatedness.indep_order must be 1 or 2.'
+        }
+
+        if (params.relatedness_hapibd.min_seed_cm <= 0) {
+            error 'params.relatedness_hapibd.min_seed_cm must be greater than zero.'
+        }
+
+        if (
+            params.relatedness_hapibd.min_extend_cm <= 0 ||
+            params.relatedness_hapibd.min_extend_cm >
+                params.relatedness_hapibd.min_seed_cm
+        ) {
+            error """
+            params.relatedness_hapibd.min_extend_cm must be greater than zero
+            and no greater than relatedness_hapibd.min_seed_cm.
+            """.stripIndent().trim()
+        }
+
+        if (params.relatedness_hapibd.min_output_cm <= 0) {
+            error 'params.relatedness_hapibd.min_output_cm must be greater than zero.'
+        }
+
+        if (params.relatedness_hapibd.min_markers < 1) {
+            error 'params.relatedness_hapibd.min_markers must be at least one.'
+        }
+
+        if (params.relatedness_hapibd.min_mac < 1) {
+            error 'params.relatedness_hapibd.min_mac must be at least one.'
+        }
+
+        if (params.relatedness_hapibd.max_gap_bp < -1) {
+            error 'params.relatedness_hapibd.max_gap_bp must be at least -1.'
+        }
+
+        if (params.relatedness_summary.segment_threshold_cm < 0) {
+            error 'params.relatedness_summary.segment_threshold_cm must be at least zero.'
+        }
+    }
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Final Hap-IBD validation
+     * ---------------------------------------------------------------
+     */
+
     if (params.hapibd.min_seed_cm <= 0) {
         error 'params.hapibd.min_seed_cm must be greater than zero.'
     }
@@ -993,7 +1926,10 @@ workflow {
         params.hapibd.min_extend_cm <= 0 ||
         params.hapibd.min_extend_cm > params.hapibd.min_seed_cm
     ) {
-        error 'params.hapibd.min_extend_cm must be greater than zero and no greater than min_seed_cm.'
+        error """
+        params.hapibd.min_extend_cm must be greater than zero and no greater
+        than params.hapibd.min_seed_cm.
+        """.stripIndent().trim()
     }
 
     if (params.hapibd.min_output_cm <= 0) {
@@ -1013,14 +1949,28 @@ workflow {
     }
 
     if (params.summary.segment_threshold_cm < 0) {
-        error 'params.summary.segment_threshold_cm must be greater than or equal to zero.'
+        error 'params.summary.segment_threshold_cm must be at least zero.'
     }
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Clustering validation
+     * ---------------------------------------------------------------
+     */
 
     if (
         params.n_louvain < 0 ||
         params.n_leiden < 0
     ) {
-        error 'Clustering refinement depths must be greater than or equal to zero.'
+        error 'Clustering refinement depths must be at least zero.'
+    }
+
+    if (
+        (params.Louvain || params.Leiden) &&
+        !params.clustering_script
+    ) {
+        error 'Set params.clustering_script when clustering is enabled.'
     }
 
     if (
@@ -1034,7 +1984,7 @@ workflow {
         (params.Louvain || params.Leiden) &&
         params.clustering.min_modularity_gain < 0
     ) {
-        error 'params.clustering.min_modularity_gain must be greater than or equal to zero.'
+        error 'params.clustering.min_modularity_gain must be at least zero.'
     }
 
     if (
@@ -1044,58 +1994,123 @@ workflow {
         error 'params.clustering.leiden_resolution must be greater than zero.'
     }
 
+
+    /*
+     * ---------------------------------------------------------------
+     * FST validation
+     * ---------------------------------------------------------------
+     */
+
     if (
         params.fst.enabled &&
-        (params.fst.min_maf < 0 || params.fst.min_maf > 0.5)
+        !(params.Louvain || params.Leiden)
+    ) {
+        error 'Enable Louvain and/or Leiden when FST clumping is enabled.'
+    }
+
+    if (
+        params.fst.enabled &&
+        !params.fst_clump_script
+    ) {
+        error 'Set params.fst_clump_script when FST clumping is enabled.'
+    }
+
+    if (
+        params.fst.enabled &&
+        !params.final_ibd_script
+    ) {
+        error 'Set params.final_ibd_script when FST clumping is enabled.'
+    }
+
+    if (
+        params.fst.enabled &&
+        !params.final_fst_heatmap_script
+    ) {
+        error 'Set params.final_fst_heatmap_script when FST clumping is enabled.'
+    }
+
+    if (
+        params.fst.enabled &&
+        (
+            params.fst.min_maf < 0 ||
+            params.fst.min_maf > 0.5
+        )
     ) {
         error 'params.fst.min_maf must be between 0 and 0.5.'
     }
 
     if (
         params.fst.enabled &&
-        (params.fst.max_variant_missingness < 0 || params.fst.max_variant_missingness > 1)
+        (
+            params.fst.max_variant_missingness < 0 ||
+            params.fst.max_variant_missingness > 1
+        )
     ) {
         error 'params.fst.max_variant_missingness must be between 0 and 1.'
     }
 
     if (
         params.fst.enabled &&
-        (params.fst.hwe_pvalue <= 0 || params.fst.hwe_pvalue > 1)
+        (
+            params.fst.hwe_pvalue <= 0 ||
+            params.fst.hwe_pvalue > 1
+        )
     ) {
-        error 'params.fst.hwe_pvalue must be greater than zero and no greater than one.'
+        error 'params.fst.hwe_pvalue must be greater than 0 and no greater than 1.'
     }
 
-    if (params.fst.enabled && params.fst.prune_window_kb < 1) {
+    if (
+        params.fst.enabled &&
+        params.fst.prune_window_kb < 1
+    ) {
         error 'params.fst.prune_window_kb must be at least one.'
     }
 
-    if (params.fst.enabled && params.fst.prune_step_variants < 1) {
+    if (
+        params.fst.enabled &&
+        params.fst.prune_step_variants < 1
+    ) {
         error 'params.fst.prune_step_variants must be at least one.'
     }
 
     if (
         params.fst.enabled &&
-        (params.fst.prune_r2 <= 0 || params.fst.prune_r2 >= 1)
+        (
+            params.fst.prune_r2 <= 0 ||
+            params.fst.prune_r2 >= 1
+        )
     ) {
-        error 'params.fst.prune_r2 must be greater than zero and smaller than one.'
+        error 'params.fst.prune_r2 must be greater than 0 and smaller than 1.'
     }
 
-    if (params.fst.enabled && params.fst.clump_threshold < 0) {
-        error 'params.fst.clump_threshold must be greater than or equal to zero.'
+    if (
+        params.fst.enabled &&
+        params.fst.clump_threshold < 0
+    ) {
+        error 'params.fst.clump_threshold must be at least zero.'
     }
 
-    if (params.fst.enabled && params.fst.min_cluster_size < 2) {
+    if (
+        params.fst.enabled &&
+        params.fst.min_cluster_size < 2
+    ) {
         error 'params.fst.min_cluster_size must be at least two.'
     }
 
-    if (params.fst.enabled && !params.fst.cluster_column) {
+    if (
+        params.fst.enabled &&
+        !params.fst.cluster_column
+    ) {
         error 'Set params.fst.cluster_column.'
     }
 
 
     /*
-     * Resolve fixed program and asset files.
+     * ---------------------------------------------------------------
+     * Resolve scripts and fixed files
+     * ---------------------------------------------------------------
      */
+
     hapibdJar = file(
         params.hapibd_jar,
         checkIfExists: true
@@ -1111,28 +2126,51 @@ workflow {
         checkIfExists: true
     )
 
+    if (params.Louvain || params.Leiden) {
+        clusteringScript = file(
+            params.clustering_script,
+            checkIfExists: true
+        )
+    }
+
     if (params.fst.enabled) {
         fstClumpScript = file(
             params.fst_clump_script,
+            checkIfExists: true
+        )
+
+        finalIbdScript = file(
+            params.final_ibd_script,
+            checkIfExists: true
+        )
+
+        finalFstHeatmapScript = file(
+            params.final_fst_heatmap_script,
+            checkIfExists: true
+        )
+    }
+
+    if (relatednessMode == 'discover_apply') {
+        relatednessSelectorScript = file(
+            params.relatedness_selector_script,
+            checkIfExists: true
+        )
+    }
+
+    if (relatednessMode == 'reuse') {
+        suppliedUnrelatedSamples = file(
+            params.relatedness.sample_list,
             checkIfExists: true
         )
     }
 
 
     /*
-     * Select the bundled GRCh38 PLINK maps without modifying or
-     * renaming them.
-     *
-     * false:
-     *   VCF chromosomes are 1, 2, ..., 22.
-     *   Maps are:
-     *   assets/no_chr_in_chrom_field/plink.chrN.GRCh38.map
-     *
-     * true:
-     *   VCF chromosomes are chr1, chr2, ..., chr22.
-     *   Maps are:
-     *   assets/chr_in_chrom_field/plink.chrchrN.GRCh38.map
+     * ---------------------------------------------------------------
+     * Genetic-map path convention
+     * ---------------------------------------------------------------
      */
+
     def chrInChromField = params.chr_in_chrom_field
 
     def geneticMapDirectory = chrInChromField \
@@ -1145,8 +2183,11 @@ workflow {
 
 
     /*
-     * Construct one input tuple for each chromosome.
+     * ---------------------------------------------------------------
+     * Construct chromosome input tuples
+     * ---------------------------------------------------------------
      */
+
     inputs = Channel
         .fromList(params.chromosomes as List)
         .map { chromosome ->
@@ -1184,13 +2225,16 @@ workflow {
 
 
     /*
-     * Perform variant QC and verify chromosome sample lists.
+     * ---------------------------------------------------------------
+     * Full-cohort variant QC
+     * ---------------------------------------------------------------
      */
+
     qc = QC_VCF(
         inputs
     )
 
-    validatedSamples = VALIDATE_SAMPLES(
+    fullCohortSamples = VALIDATE_SAMPLES(
         qc.samples
             .map { chromosome, sampleFile ->
                 sampleFile
@@ -1200,14 +2244,135 @@ workflow {
 
 
     /*
-     * Prepare one reusable, LD-pruned genotype dataset for all enabled
-     * clustering methods. This branch can run concurrently with Hap-IBD.
+     * ---------------------------------------------------------------
+     * Relatedness discovery or sample-list reuse
+     * ---------------------------------------------------------------
      */
-    if (params.fst.enabled) {
-        fstDataset = PREPARE_FST_DATA(
+
+    if (relatednessMode == 'discover_apply') {
+        relatednessHapIBD = HAP_IBD_RELATEDNESS(
+            qc.vcfs,
+            hapibdJar
+        )
+
+        relatednessChromosomeSummaries =
+            PER_PAIR_CHROMOSOME_RELATEDNESS(
+                relatednessHapIBD.segments,
+                summaryScript
+            )
+
+        relatednessGenomewideSummary =
+            PER_PAIR_GENOMEWIDE_RELATEDNESS(
+                relatednessChromosomeSummaries
+                    .map { chromosome, summaryFile ->
+                        summaryFile
+                    }
+                    .collect(),
+                summaryScript
+            )
+
+        kingResults = KING_RELATEDNESS(
             qc.vcfs
                 .toSortedList { first, second ->
-                    (first[0] as Integer) <=> (second[0] as Integer)
+                    (first[0] as Integer) <=>
+                    (second[0] as Integer)
+                }
+                .map { chromosomeTuples ->
+                    chromosomeTuples.collect { chromosomeTuple ->
+                        chromosomeTuple[1]
+                    }
+                }
+        )
+
+        relatednessSelection = SELECT_UNRELATED_SAMPLES(
+            fullCohortSamples,
+            kingResults.pairs,
+            relatednessGenomewideSummary,
+            relatednessSelectorScript
+        )
+
+        /*
+         * collect() converts the selector output into a reusable value
+         * channel so the same list is supplied to every chromosome.
+         */
+        selectedSamples = relatednessSelection.unrelated
+            .collect()
+            .map { sampleLists ->
+                sampleLists[0]
+            }
+    }
+    else if (relatednessMode == 'reuse') {
+        selectedSamples = suppliedUnrelatedSamples
+    }
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Select the cohort used by all final analyses
+     * ---------------------------------------------------------------
+     */
+
+    if (relatednessMode != 'disabled') {
+        unrelatedQc = APPLY_UNRELATED_SAMPLES(
+            qc.vcfs,
+            selectedSamples
+        )
+
+        analysisVcfs = unrelatedQc.vcfs
+        analysisSampleFiles = unrelatedQc.samples
+    }
+    else {
+        analysisVcfs = qc.vcfs
+        analysisSampleFiles = qc.samples
+    }
+
+    analysisSamples = VALIDATE_ANALYSIS_SAMPLES(
+        analysisSampleFiles
+            .map { chromosome, sampleFile ->
+                sampleFile
+            }
+            .collect()
+    )
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Final unrelated-cohort Hap-IBD analysis
+     * ---------------------------------------------------------------
+     */
+
+    finalHapIBD = HAP_IBD(
+        analysisVcfs,
+        hapibdJar
+    )
+
+    finalChromosomeSummaries = PER_PAIR_CHROMOSOME(
+        finalHapIBD.segments,
+        summaryScript
+    )
+
+    finalGenomewideSummary = PER_PAIR_GENOMEWIDE(
+        finalChromosomeSummaries
+            .map { chromosome, summaryFile ->
+                summaryFile
+            }
+            .collect(),
+        summaryScript
+    )
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Prepare the unrelated-cohort FST genotype dataset
+     * ---------------------------------------------------------------
+     */
+
+    if (params.fst.enabled) {
+        fstDataset = PREPARE_FST_DATA(
+            analysisVcfs
+                .toSortedList { first, second ->
+                    (first[0] as Integer) <=>
+                    (second[0] as Integer)
                 }
                 .map { chromosomeTuples ->
                     chromosomeTuples.collect { chromosomeTuple ->
@@ -1219,35 +2384,11 @@ workflow {
 
 
     /*
-     * Detect IBD segments using the official GRCh38 PLINK maps.
+     * ---------------------------------------------------------------
+     * Louvain and Leiden clustering
+     * ---------------------------------------------------------------
      */
-    hapIBD = HAP_IBD(
-        qc.vcfs,
-        hapibdJar
-    )
 
-
-    /*
-     * Generate chromosome-specific and genome-wide pair summaries.
-     */
-    chromosomePairSummaries = PER_PAIR_CHROMOSOME(
-        hapIBD.segments,
-        summaryScript
-    )
-
-    genomewideSummary = PER_PAIR_GENOMEWIDE(
-        chromosomePairSummaries
-            .map { chromosome, summaryFile ->
-                summaryFile
-            }
-            .collect(),
-        summaryScript
-    )
-
-
-    /*
-     * Build the requested clustering-method channel.
-     */
     clusteringMethods = []
 
     if (params.Louvain) {
@@ -1264,31 +2405,35 @@ workflow {
         )
     }
 
-
-    /*
-     * Run each requested clustering algorithm.
-     *
-     * genomewideSummary and validatedSamples are reusable value
-     * channels because their upstream inputs were created with collect().
-     */
     if (clusteringMethods) {
-        clusteringScript = file(
-            params.clustering_script,
-            checkIfExists: true
-        )
-
         clusteringResults = CLUSTER_GRAPH(
             Channel.fromList(clusteringMethods),
-            genomewideSummary,
-            validatedSamples,
+            finalGenomewideSummary,
+            analysisSamples,
             clusteringScript
         )
 
+        /*
+         * FST clumping uses the same unrelated sample set because both the
+         * membership and PGEN files descend from analysisVcfs.
+         */
         if (params.fst.enabled) {
-            FST_CLUMP(
+            fstClumpResults = FST_CLUMP(
                 clusteringResults.membership,
                 fstDataset.dataset,
                 fstClumpScript
+            )
+
+            FINAL_IBD_SHARING(
+                fstClumpResults.final_membership,
+                finalGenomewideSummary,
+                finalIbdScript
+            )
+
+            FINAL_FST_HEATMAP(
+                fstClumpResults.final_membership,
+                fstDataset.dataset,
+                finalFstHeatmapScript
             )
         }
     }
