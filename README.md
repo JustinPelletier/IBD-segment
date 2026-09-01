@@ -59,7 +59,9 @@ IBD-segment/
     ├── fst_clump.py
     ├── relatedness_selector.py
     ├── final_ibd_sharing.py
-    └── final_fst_heatmap.py
+    ├── final_fst_heatmap.py
+    ├── run_ibdne_clusters.py
+    └── ibdne.23Apr20.ae9.jar
 ```
 
 ## Input requirements
@@ -109,6 +111,7 @@ chromosomes = 1..22
 | `FST_CLUMP` | Python standard library and a recent PLINK 2 |
 | `FINAL_IBD_SHARING` | Python with NumPy and Matplotlib |
 | `FINAL_FST_HEATMAP` | Python with NumPy and Matplotlib, and a recent PLINK 2 |
+| `RUN_IBDNE_FINAL_CLUSTERS` | Java, Python standard library and IBDNe |
 
 Load Nextflow before launching the workflow:
 
@@ -185,6 +188,8 @@ fst_clump_script = "${projectDir}/bin/fst_clump.py"
 relatedness_selector_script = "${projectDir}/bin/relatedness_selector.py"
 final_ibd_script = "${projectDir}/bin/final_ibd_sharing.py"
 final_fst_heatmap_script = "${projectDir}/bin/final_fst_heatmap.py"
+ibdne_runner_script = "${projectDir}/bin/run_ibdne_clusters.py"
+ibdne_jar = "${projectDir}/bin/ibdne.23Apr20.ae9.jar"
 ```
 
 ### Genetic maps and chromosome names
@@ -411,6 +416,48 @@ merge avoids transitive connected-component chaining.
 Final labels (`Cluster_1`, `Cluster_2`, ...) are assigned deterministically by
 decreasing cluster size, with the retained internal label used to break ties.
 
+### Final-cluster IBDNe
+
+```groovy
+ibdne {
+    enabled = true
+    min_cluster_size = 20
+
+    mincm = 2.0
+    nits = 1000
+    nboots = 80
+    filtersamples = true
+    seed = 2026
+
+    parallel_clusters = 2
+    java_heap_gb = 24
+}
+```
+
+`RUN_IBDNE_FINAL_CLUSTERS` runs after FST clumping. For each Louvain and/or
+Leiden result, it streams the chromosome Hap-IBD files once and retains only
+segments whose two samples belong to the same `final_cluster`. Final clusters
+with fewer than `ibdne.min_cluster_size` participants are skipped and recorded
+in the status table.
+
+The number of unordered haplotype pairs is supplied explicitly as
+
+\[
+\mathrm{npairs}=\frac{2N(2N-2)}{2},
+\]
+
+where \(N\) is the complete final-cluster sample count. This prevents cluster
+members with no retained within-cluster segment from being omitted from the
+IBDNe sampling denominator. Cluster-specific segment files are created in
+node-local `$SLURM_TMPDIR` and are not published.
+
+The process runs up to `parallel_clusters` IBDNe analyses concurrently within
+each clustering-method task. `java_heap_gb × parallel_clusters`, Python/Java
+overhead, and filesystem buffers must fit within `resources.ibdne.memory`.
+
+Download the official IBDNe JAR and place it at the configured path before
+running. The current implementation targets `ibdne.23Apr20.ae9.jar`.
+
 ### Resources
 
 ```groovy
@@ -426,6 +473,7 @@ resources {
     fst_clump           { cpus = 8; memory = '4 GB';   time = '2h' }
     final_ibd           { cpus = 1; memory = '16 GB';  time = '6h' }
     final_fst           { cpus = 8; memory = '32 GB';  time = '12h' }
+    ibdne               { cpus = 16; memory = '64 GB'; time = '48h' }
 }
 ```
 
@@ -525,10 +573,20 @@ results/
     │   │   ├── louvain.ibd_mean_matrix.tsv
     │   │   ├── louvain.ibd_heatmap.png
     │   │   └── louvain.within_ibd_boxplot.png
-    │   └── final_fst/
-    │       ├── louvain.final_fst.tsv
-    │       ├── louvain.final_fst_matrix.tsv
-    │       └── louvain.final_fst_heatmap.png
+    │   ├── final_fst/
+    │   │   ├── louvain.final_fst.tsv
+    │   │   ├── louvain.final_fst_matrix.tsv
+    │   │   └── louvain.final_fst_heatmap.png
+    │   └── ibdne/
+    │       ├── louvain.ibdne_status.tsv
+    │       └── Cluster_*/
+    │           ├── Cluster_*.ne
+    │           ├── Cluster_*.boot
+    │           ├── Cluster_*.log
+    │           ├── Cluster_*.pair.excl
+    │           ├── Cluster_*.region.excl
+    │           ├── Cluster_*.command.txt
+    │           └── Cluster_*.driver.log
     └── leiden/
         ├── leiden.pairwise_fst.tsv.gz
         ├── leiden.fst_merge_history.tsv
@@ -540,10 +598,20 @@ results/
         │   ├── leiden.ibd_mean_matrix.tsv
         │   ├── leiden.ibd_heatmap.png
         │   └── leiden.within_ibd_boxplot.png
-        └── final_fst/
-            ├── leiden.final_fst.tsv
-            ├── leiden.final_fst_matrix.tsv
-            └── leiden.final_fst_heatmap.png
+        ├── final_fst/
+        │   ├── leiden.final_fst.tsv
+        │   ├── leiden.final_fst_matrix.tsv
+        │   └── leiden.final_fst_heatmap.png
+        └── ibdne/
+            ├── leiden.ibdne_status.tsv
+            └── Cluster_*/
+                ├── Cluster_*.ne
+                ├── Cluster_*.boot
+                ├── Cluster_*.log
+                ├── Cluster_*.pair.excl
+                ├── Cluster_*.region.excl
+                ├── Cluster_*.command.txt
+                └── Cluster_*.driver.log
 ```
 
 ### Hap-IBD segments
@@ -633,6 +701,19 @@ earlier clumping iteration.
 | `{method}.final_fst.tsv` | Long-format exact pairwise Hudson FST estimates |
 | `{method}.final_fst_matrix.tsv` | Symmetric final-cluster FST matrix |
 | `{method}.final_fst_heatmap.png` | Annotated `YlOrRd` heatmap with adaptive text color |
+
+### Final-cluster IBDNe outputs
+
+| File | Description |
+|---|---|
+| `{method}.ibdne_status.tsv` | Cluster sample size, retained segment count, explicit `npairs`, completion/skip status, and failure message |
+| `Cluster_*.ne` | Effective population-size estimate and 95% bootstrap confidence interval by generation |
+| `Cluster_*.boot` | Original and bootstrap effective population-size histories |
+| `Cluster_*.pair.excl` | Close sample pairs excluded by IBDNe |
+| `Cluster_*.region.excl` | Genomic regions excluded by IBDNe |
+| `Cluster_*.log` | Native IBDNe run log |
+| `Cluster_*.command.txt` | Exact IBDNe command and parameter values used for the cluster |
+| `Cluster_*.driver.log` | Standard output/error captured by the pipeline driver |
 
 
 
