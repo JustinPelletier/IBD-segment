@@ -85,7 +85,7 @@ def write_matrix(path: Path, clusters: list[str], matrix: np.ndarray):
 def heatmap(path: Path, clusters: list[str], matrix: np.ndarray, title: str):
     size = max(8.0, 0.48 * len(clusters) + 3.0)
     fig, ax = plt.subplots(figsize=(size, size))
-    image = ax.imshow(matrix, cmap="PiYG", aspect="equal")
+    image = ax.imshow(matrix, cmap="YlOrRd", aspect="equal")
     ax.set_xticks(range(len(clusters)), clusters, rotation=90)
     ax.set_yticks(range(len(clusters)), clusters)
     ax.set_title(title)
@@ -98,7 +98,7 @@ def heatmap(path: Path, clusters: list[str], matrix: np.ndarray, title: str):
                 ax.text(
                     column, row, f"{value:.3f}", ha="center", va="center",
                     fontsize=max(4, 9 - len(clusters) // 4),
-                    color="white" if value < midpoint else "black",
+                    color="black" if value < midpoint else "white"
                 )
     colorbar = fig.colorbar(image, ax=ax, shrink=0.8)
     colorbar.set_label("Mean total IBD length per possible pair (cM)")
