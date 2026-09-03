@@ -1630,6 +1630,7 @@ process FINAL_IBD_SHARING {
 
     output:
     path "${method}.ibd_sharing.tsv"
+    path "${method}.within_cluster_distribution.tsv"
     path "${method}.ibd_mean_matrix.tsv"
     path "${method}.ibd_heatmap.png"
     path "${method}.within_ibd_boxplot.png"
@@ -1707,6 +1708,80 @@ process FINAL_FST_HEATMAP {
 
 
 
+
+
+/*
+ * Estimate recent effective population-size histories for eligible final
+ * clusters. The driver streams the final Hap-IBD segments once, retains only
+ * within-cluster segments, and runs cluster-level IBDNe analyses concurrently.
+ */
+process RUN_IBDNE_FINAL_CLUSTERS {
+    tag "${method} final-cluster IBDNe"
+
+    cpus params.resources.ibdne.cpus
+    memory params.resources.ibdne.memory
+    time params.resources.ibdne.time
+
+    errorStrategy 'terminate'
+
+    beforeScript """
+    module load python/3.14.2
+    module load java/25.36
+    source ${params.python_venv}/bin/activate
+    """
+
+    publishDir {
+        "${params.outdir}/clustering/${method}"
+    },
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    tuple val(method),
+          path(membership)
+
+    path ibd_segments
+    path genetic_maps
+    path ibdne_jar
+    path ibdne_runner_script
+
+    output:
+    tuple val(method),
+          path('ibdne'),
+          emit: results
+
+    script:
+    """
+    set -euo pipefail
+
+    if [[ -z "\${SLURM_TMPDIR:-}" ]]
+    then
+        echo "ERROR: SLURM_TMPDIR is not defined." >&2
+        exit 1
+    fi
+
+    temporary_directory="\${SLURM_TMPDIR}/${method}.ibdne.\${SLURM_JOB_ID:-task}"
+    mkdir -p "\${temporary_directory}" ibdne
+
+    python3 ${ibdne_runner_script} \
+        --segments ${ibd_segments.join(' ')} \
+        --maps ${genetic_maps.join(' ')} \
+        --membership ${membership} \
+        --ibdne-jar ${ibdne_jar} \
+        --method ${method} \
+        --minimum-cluster-size ${params.ibdne.min_cluster_size} \
+        --mincm ${params.ibdne.mincm} \
+        --nits ${params.ibdne.nits} \
+        --nboots ${params.ibdne.nboots} \
+        --filtersamples ${params.ibdne.filtersamples} \
+        --seed ${params.ibdne.seed} \
+        --threads ${task.cpus} \
+        --parallel-clusters ${params.ibdne.parallel_clusters} \
+        --java-heap-gb ${params.ibdne.java_heap_gb} \
+        --temporary-directory "\${temporary_directory}" \
+        --output-directory ibdne
+    """
+}
 
 
 workflow {
@@ -2028,6 +2103,40 @@ workflow {
         error 'Set params.final_fst_heatmap_script when FST clumping is enabled.'
     }
 
+    if (params.ibdne.enabled && !params.fst.enabled) {
+        error 'Enable params.fst.enabled when final-cluster IBDNe is enabled.'
+    }
+
+    if (params.ibdne.enabled && !params.ibdne_jar) {
+        error 'Set params.ibdne_jar when final-cluster IBDNe is enabled.'
+    }
+
+    if (params.ibdne.enabled && !params.ibdne_runner_script) {
+        error 'Set params.ibdne_runner_script when final-cluster IBDNe is enabled.'
+    }
+
+    if (params.ibdne.enabled && params.ibdne.min_cluster_size < 2) {
+        error 'params.ibdne.min_cluster_size must be at least two.'
+    }
+
+    if (params.ibdne.enabled && params.ibdne.mincm <= 0) {
+        error 'params.ibdne.mincm must be greater than zero.'
+    }
+
+    if (
+        params.ibdne.enabled &&
+        (params.ibdne.nits < 1 || params.ibdne.nboots < 1)
+    ) {
+        error 'params.ibdne.nits and params.ibdne.nboots must be positive.'
+    }
+
+    if (
+        params.ibdne.enabled &&
+        (params.ibdne.parallel_clusters < 1 || params.ibdne.java_heap_gb < 1)
+    ) {
+        error 'IBDNe parallel_clusters and java_heap_gb must be positive.'
+    }
+
     if (
         params.fst.enabled &&
         (
@@ -2145,6 +2254,18 @@ workflow {
 
         finalFstHeatmapScript = file(
             params.final_fst_heatmap_script,
+            checkIfExists: true
+        )
+    }
+
+    if (params.ibdne.enabled) {
+        ibdneJar = file(
+            params.ibdne_jar,
+            checkIfExists: true
+        )
+
+        ibdneRunnerScript = file(
+            params.ibdne_runner_script,
             checkIfExists: true
         )
     }
@@ -2434,6 +2555,38 @@ workflow {
                 fstDataset.dataset,
                 finalFstHeatmapScript
             )
+
+            if (params.ibdne.enabled) {
+                finalIbdSegmentsForIbdne = finalHapIBD.segments
+                    .toSortedList { first, second ->
+                        (first[0] as Integer) <=>
+                        (second[0] as Integer)
+                    }
+                    .map { chromosomeTuples ->
+                        chromosomeTuples.collect { chromosomeTuple ->
+                            chromosomeTuple[1]
+                        }
+                    }
+
+                finalMapsForIbdne = analysisVcfs
+                    .toSortedList { first, second ->
+                        (first[0] as Integer) <=>
+                        (second[0] as Integer)
+                    }
+                    .map { chromosomeTuples ->
+                        chromosomeTuples.collect { chromosomeTuple ->
+                            chromosomeTuple[3]
+                        }
+                    }
+
+                RUN_IBDNE_FINAL_CLUSTERS(
+                    fstClumpResults.final_membership,
+                    finalIbdSegmentsForIbdne,
+                    finalMapsForIbdne,
+                    ibdneJar,
+                    ibdneRunnerScript
+                )
+            }
         }
     }
 }
